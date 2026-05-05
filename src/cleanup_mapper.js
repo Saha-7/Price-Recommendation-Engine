@@ -140,41 +140,62 @@ async function runMapper() {
     // Step 4: Insert (MERGE)
     console.log('\n📤 Inserting into CompetitorPrices...');
 
-    let inserted = 0;
-    let updated  = 0;
+    let inserted  = 0;
+    let updated   = 0;
+    let failed    = 0;
+    const failedRows = [];
 
     for (const row of mapped) {
-      const result = await pool.request()
-        .input('ScrapID',         sql.NVarChar(36),       row.ScrapID)
-        .input('SKU',             sql.NVarChar(100),      row.SKU)
-        .input('Name',            sql.NVarChar(500),      row.Name)
-        .input('CompetitorPrice', sql.Decimal(10, 2),     row.CompetitorPrice)
-        .input('ProductURL',      sql.NVarChar(sql.MAX),  row.ProductURL)
-        .input('StockStatus',     sql.NVarChar(50),       row.StockStatus)
-        .input('StoreName',       sql.NVarChar(100),      row.StoreName)
-        .input('Category',        sql.NVarChar(100),      row.Category)
-        .input('ScrapedAt',       sql.NVarChar(50),       row.ScrapedAt)
-        .query(`
-          MERGE CompetitorPrices AS target
-          USING (SELECT @SKU AS SKU, @StoreName AS StoreName) AS source
-            ON target.SKU = source.SKU AND target.StoreName = source.StoreName
-          WHEN MATCHED THEN
-            UPDATE SET
-              CompetitorPrice = @CompetitorPrice,
-              StockStatus     = @StockStatus,
-              ScrapedAt       = @ScrapedAt
-          WHEN NOT MATCHED THEN
-            INSERT (ScrapID, SKU, Name, CompetitorPrice, ProductURL, StockStatus, StoreName, Category, ScrapedAt)
-            VALUES (@ScrapID, @SKU, @Name, @CompetitorPrice, @ProductURL, @StockStatus, @StoreName, @Category, @ScrapedAt);
-        `);
+      try {
+        const result = await pool.request()
+          .input('ScrapID',         sql.NVarChar(36),       row.ScrapID)
+          .input('SKU',             sql.NVarChar(100),      row.SKU)
+          .input('Name',            sql.NVarChar(500),      row.Name)
+          .input('CompetitorPrice', sql.Decimal(10, 2),     row.CompetitorPrice)
+          .input('ProductURL',      sql.NVarChar(sql.MAX),  row.ProductURL)
+          .input('StockStatus',     sql.NVarChar(50),       row.StockStatus)
+          .input('StoreName',       sql.NVarChar(100),      row.StoreName)
+          .input('Category',        sql.NVarChar(100),      row.Category)
+          .input('ScrapedAt',       sql.NVarChar(50),       row.ScrapedAt)
+          .query(`
+            MERGE CompetitorPrices AS target
+            USING (SELECT @SKU AS SKU, @StoreName AS StoreName) AS source
+              ON target.SKU = source.SKU AND target.StoreName = source.StoreName
+            WHEN MATCHED THEN
+              UPDATE SET
+                CompetitorPrice = @CompetitorPrice,
+                StockStatus     = @StockStatus,
+                ScrapedAt       = @ScrapedAt
+            WHEN NOT MATCHED THEN
+              INSERT (ScrapID, SKU, Name, CompetitorPrice, ProductURL, StockStatus, StoreName, Category, ScrapedAt)
+              VALUES (@ScrapID, @SKU, @Name, @CompetitorPrice, @ProductURL, @StockStatus, @StoreName, @Category, @ScrapedAt);
+          `);
 
-      if (result.rowsAffected[0] === 1) inserted++;
-      else updated++;
+        if (result.rowsAffected[0] === 1) inserted++;
+        else updated++;
+
+      } catch (err) {
+        failed++;
+        failedRows.push({
+          SKU      : row.SKU,
+          StoreName: row.StoreName,
+          Price    : row.CompetitorPrice,
+          Error    : err.message,
+        });
+      }
     }
 
     console.log(`\n🎉 Done!`);
     console.log(`   Inserted: ${inserted}`);
     console.log(`   Updated : ${updated}`);
+    console.log(`   Failed  : ${failed}`);
+
+    if (failedRows.length > 0) {
+      console.log('\n❌ Failed rows:');
+      failedRows.forEach(r => {
+        console.log(`   SKU=${r.SKU} | Store=${r.StoreName} | Price=${r.Price} | Error=${r.Error}`);
+      });
+    }
 
     await pool.close();
 
