@@ -25,6 +25,8 @@ const tokenCache = {
 };
 
 // ── Get credential based on environment ──────────────────────
+// Locally → AzureCliCredential (uses az login)
+// Azure   → ManagedIdentityCredential (uses UAMI)
 function getCredential() {
   if (process.env.AZURE_ENV === 'production' && CLIENT_ID) {
     return new ManagedIdentityCredential({ clientId: CLIENT_ID });
@@ -93,21 +95,27 @@ async function queryDB(database, queryString, accessToken) {
   }
 }
 
-// ── Fetch purchase prices from Zoho view ──────────────────────
+// ── Fetch purchase prices from Zoho view ─────────────────────
+// Fetches col_Zoho_SKU, col_item_price_per_item, col_date
+// so we can pick the MOST RECENT price per SKU
 async function fetchPurchasePrices() {
   console.log(`📡 Fetching from ${DB_ZOHO} → vw_Zoho_Bills_Data...`);
   const accessToken = await getToken('db_zoho_accesstoken');
   const rows = await queryDB(
     DB_ZOHO,
-    `SELECT col_item_name, col_item_price_per_item
-     FROM [dbo].[vw_Zoho_Bills_Data]`,
+    `SELECT col_Zoho_SKU, col_item_price_per_item, col_date
+     FROM [dbo].[vw_Zoho_Bills_Data]
+     WHERE col_status IN ('paid', 'partially_paid', 'open', 'overdue')
+       AND col_Zoho_SKU IS NOT NULL`,
     accessToken
   );
   console.log(`   ✅ ${rows.length} rows from Zoho`);
 
-  // ── DEBUG: print first 5 Zoho keys to verify what col_item_name looks like
-  console.log('   🔍 Sample Zoho col_item_name values:');
-  rows.slice(0, 5).forEach(r => console.log(`      → "${r.col_item_name}"`));
+  // ── DEBUG: sample Zoho SKUs ───────────────────────────────
+  console.log('   🔍 Sample Zoho col_Zoho_SKU values:');
+  rows.slice(0, 5).forEach(r =>
+    console.log(`      → SKU="${r.col_Zoho_SKU}" | Price=${r.col_item_price_per_item} | Date=${r.col_date}`)
+  );
 
   return rows;
 }
@@ -124,31 +132,54 @@ async function fetchShopifySKUs() {
   );
   console.log(`   ✅ ${rows.length} rows from Shopify`);
 
-  // ── DEBUG: print first 5 Shopify titles to verify what title looks like
-  console.log('   🔍 Sample Shopify title values:');
-  rows.slice(0, 5).forEach(r => console.log(`      → "${r.title}"`));
+  // ── DEBUG: sample Shopify SKUs ────────────────────────────
+  console.log('   🔍 Sample Shopify sku values:');
+  rows.slice(0, 5).forEach(r =>
+    console.log(`      → SKU="${r.sku}" | Title="${r.title}"`)
+  );
 
   return rows;
 }
 
-// ── Combine both datasets ─────────────────────────────────────
-// Matches Zoho col_item_name → Shopify title (case-insensitive, trimmed)
-// FIX: price = SP (selling price), compare_at_price = MRP
-function combineData(zohoRows, shopifyRows) {
-  const priceMap = new Map();
+// ── Build most-recent price map from Zoho ────────────────────
+// 212k rows may have multiple bills per SKU — we keep only the
+// most recent col_date entry so PP reflects the latest purchase price
+function buildPriceMap(zohoRows) {
+  const priceMap = new Map(); // key: col_Zoho_SKU (lowercase) → { price, date }
+
   for (const row of zohoRows) {
-    const key = (row.col_item_name || '').toLowerCase().trim();
-    if (key) priceMap.set(key, row.col_item_price_per_item);
+    const key  = (row.col_Zoho_SKU || '').toLowerCase().trim();
+    if (!key) continue;
+
+    const date = row.col_date ? new Date(row.col_date) : new Date(0);
+
+    if (!priceMap.has(key)) {
+      priceMap.set(key, { price: row.col_item_price_per_item, date });
+    } else {
+      // Keep the most recent entry
+      if (date > priceMap.get(key).date) {
+        priceMap.set(key, { price: row.col_item_price_per_item, date });
+      }
+    }
   }
 
-  console.log(`   🗺️  Zoho priceMap size: ${priceMap.size} unique keys`);
+  console.log(`   🗺️  Zoho priceMap size: ${priceMap.size} unique SKUs (most recent price kept)`);
+  return priceMap;
+}
 
-  let ppMatched  = 0;
-  let ppMissed   = 0;
+// ── Combine both datasets ─────────────────────────────────────
+// Joins on SKU (Zoho col_Zoho_SKU ↔ Shopify sku)
+// FIX: price = SP (selling price), compare_at_price = MRP
+function combineData(zohoRows, shopifyRows) {
+  const priceMap = buildPriceMap(zohoRows);
+
+  let ppMatched = 0;
+  let ppMissed  = 0;
 
   const combined = shopifyRows.map(row => {
-    const key = (row.title || '').toLowerCase().trim();
-    const pp  = priceMap.get(key) ?? null;
+    const key    = (row.sku || '').toLowerCase().trim();
+    const entry  = priceMap.get(key);
+    const pp     = entry ? entry.price : null;
 
     if (pp !== null) ppMatched++;
     else             ppMissed++;
@@ -158,22 +189,22 @@ function combineData(zohoRows, shopifyRows) {
       Title    : row.title             ?? null,
       Brand    : row.brand_name        ?? null,
       Category : row.shopify_type_name ?? null,
-      SP       : row.price             ?? null,   // ✅ FIXED: price = selling price
-      MRP      : row.compare_at_price  ?? null,   // ✅ FIXED: compare_at_price = MRP
-      PP       : pp,                              // from Zoho — null if no title match
+      SP       : row.price             ?? null,  // ✅ FIXED: price = selling price
+      MRP      : row.compare_at_price  ?? null,  // ✅ FIXED: compare_at_price = MRP
+      PP       : pp,                             // most recent purchase price from Zoho
     };
   });
 
   console.log(`   ✅ PP matched : ${ppMatched} rows`);
-  console.log(`   ⚠️  PP missing : ${ppMissed} rows (no Zoho title match)`);
+  console.log(`   ⚠️  PP missing : ${ppMissed} rows (no Zoho SKU match)`);
 
-  // ── DEBUG: show a few unmatched Shopify titles so we can fix the join
+  // ── DEBUG: show unmatched Shopify SKUs if any ─────────────
   if (ppMissed > 0) {
-    console.log('   🔍 Sample unmatched Shopify titles (first 5):');
+    console.log('   🔍 Sample unmatched Shopify SKUs (first 5):');
     shopifyRows
-      .filter(r => !priceMap.has((r.title || '').toLowerCase().trim()))
+      .filter(r => !priceMap.has((r.sku || '').toLowerCase().trim()))
       .slice(0, 5)
-      .forEach(r => console.log(`      → "${r.title}"`));
+      .forEach(r => console.log(`      → SKU="${r.sku}" | Title="${r.title}"`));
   }
 
   return combined;
