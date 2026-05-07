@@ -38,6 +38,8 @@ function dummyBit(index) {
 
 // ── Main ──────────────────────────────────────────────────────
 async function syncInternalProducts() {
+  const startTime = Date.now();
+
   try {
     // Step 1: Fetch combined data from both views
     const { combined } = await fetchCombinedData();
@@ -61,6 +63,9 @@ async function syncInternalProducts() {
     let updated  = 0;
     let failed   = 0;
     const failedRows = [];
+
+    // ── Progress log every 500 rows ──────────────────────────
+    const PROGRESS_EVERY = 500;
 
     for (let i = 0; i < valid.length; i++) {
       const row = valid[i];
@@ -101,14 +106,20 @@ async function syncInternalProducts() {
 
       } catch (err) {
         failed++;
-        failedRows.push({
-          SKU_ID: row.SKU_ID,
-          Error : err.message,
-        });
+        failedRows.push({ SKU_ID: row.SKU_ID, Error: err.message });
+        console.warn(`   ⚠️  [${i + 1}/${valid.length}] Failed SKU=${row.SKU_ID} | ${err.message}`);
+      }
+
+      // ── Progress report every N rows ─────────────────────
+      if ((i + 1) % PROGRESS_EVERY === 0 || i + 1 === valid.length) {
+        const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+        console.log(`   ⏳ [${i + 1}/${valid.length}] Inserted:${inserted} Updated:${updated} Failed:${failed} | ${elapsed}s elapsed`);
       }
     }
 
-    console.log(`\n🎉 Done!`);
+    const totalSec = ((Date.now() - startTime) / 1000).toFixed(1);
+
+    console.log(`\n🎉 Done! Total time: ${totalSec}s`);
     console.log(`   Inserted: ${inserted}`);
     console.log(`   Updated : ${updated}`);
     console.log(`   Failed  : ${failed}`);
