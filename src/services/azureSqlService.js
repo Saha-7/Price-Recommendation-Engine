@@ -25,8 +25,6 @@ const tokenCache = {
 };
 
 // ── Get credential based on environment ──────────────────────
-// Locally → AzureCliCredential (uses az login)
-// Azure   → ManagedIdentityCredential (uses UAMI)
 function getCredential() {
   if (process.env.AZURE_ENV === 'production' && CLIENT_ID) {
     return new ManagedIdentityCredential({ clientId: CLIENT_ID });
@@ -106,6 +104,11 @@ async function fetchPurchasePrices() {
     accessToken
   );
   console.log(`   ✅ ${rows.length} rows from Zoho`);
+
+  // ── DEBUG: print first 5 Zoho keys to verify what col_item_name looks like
+  console.log('   🔍 Sample Zoho col_item_name values:');
+  rows.slice(0, 5).forEach(r => console.log(`      → "${r.col_item_name}"`));
+
   return rows;
 }
 
@@ -120,12 +123,17 @@ async function fetchShopifySKUs() {
     accessToken
   );
   console.log(`   ✅ ${rows.length} rows from Shopify`);
+
+  // ── DEBUG: print first 5 Shopify titles to verify what title looks like
+  console.log('   🔍 Sample Shopify title values:');
+  rows.slice(0, 5).forEach(r => console.log(`      → "${r.title}"`));
+
   return rows;
 }
 
-// ── Combine both datasets ────────────────────────────────────
+// ── Combine both datasets ─────────────────────────────────────
+// Matches Zoho col_item_name → Shopify title (case-insensitive, trimmed)
 // FIX: price = SP (selling price), compare_at_price = MRP
-// Old code had these reversed — corrected here.
 function combineData(zohoRows, shopifyRows) {
   const priceMap = new Map();
   for (const row of zohoRows) {
@@ -133,18 +141,42 @@ function combineData(zohoRows, shopifyRows) {
     if (key) priceMap.set(key, row.col_item_price_per_item);
   }
 
-  return shopifyRows.map(row => {
+  console.log(`   🗺️  Zoho priceMap size: ${priceMap.size} unique keys`);
+
+  let ppMatched  = 0;
+  let ppMissed   = 0;
+
+  const combined = shopifyRows.map(row => {
     const key = (row.title || '').toLowerCase().trim();
+    const pp  = priceMap.get(key) ?? null;
+
+    if (pp !== null) ppMatched++;
+    else             ppMissed++;
+
     return {
-      SKU_ID   : row.sku             ?? null,
-      Title    : row.title           ?? null,
-      Brand    : row.brand_name      ?? null,
+      SKU_ID   : row.sku               ?? null,
+      Title    : row.title             ?? null,
+      Brand    : row.brand_name        ?? null,
       Category : row.shopify_type_name ?? null,
-      SP       : row.price           ?? null,   // ✅ FIXED: price = selling price
-      MRP      : row.compare_at_price ?? null,  // ✅ FIXED: compare_at_price = MRP
-      PP       : priceMap.get(key)   ?? null,   // from Zoho
+      SP       : row.price             ?? null,   // ✅ FIXED: price = selling price
+      MRP      : row.compare_at_price  ?? null,   // ✅ FIXED: compare_at_price = MRP
+      PP       : pp,                              // from Zoho — null if no title match
     };
   });
+
+  console.log(`   ✅ PP matched : ${ppMatched} rows`);
+  console.log(`   ⚠️  PP missing : ${ppMissed} rows (no Zoho title match)`);
+
+  // ── DEBUG: show a few unmatched Shopify titles so we can fix the join
+  if (ppMissed > 0) {
+    console.log('   🔍 Sample unmatched Shopify titles (first 5):');
+    shopifyRows
+      .filter(r => !priceMap.has((r.title || '').toLowerCase().trim()))
+      .slice(0, 5)
+      .forEach(r => console.log(`      → "${r.title}"`));
+  }
+
+  return combined;
 }
 
 // ── Public API ────────────────────────────────────────────────
