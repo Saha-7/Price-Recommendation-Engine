@@ -77,13 +77,13 @@ async function syncInternalProducts() {
       try {
         const result = await pool.request()
           .input('SKU_ID',    sql.NVarChar(100),  row.SKU_ID)
-          .input('Title',     sql.NVarChar(500),   row.Title)
-          .input('Brand',     sql.NVarChar(200),   row.Brand)
-          .input('Category',  sql.NVarChar(200),   row.Category)
-          .input('PP',        sql.Decimal(10, 2),  row.PP)
-          .input('SP',        sql.Decimal(10, 2),  row.SP)
-          .input('isActive',  sql.Bit,             isActive)
-          .input('isInStock', sql.Bit,             isInStock)
+          .input('Title',     sql.NVarChar(500),  row.Title)
+          .input('Brand',     sql.NVarChar(200),  row.Brand)
+          .input('Category',  sql.NVarChar(200),  row.Category)
+          .input('PP',        sql.Decimal(10, 2), row.PP)
+          .input('SP',        sql.Decimal(10, 2), row.SP)
+          .input('isActive',  sql.Bit,            isActive)
+          .input('isInStock', sql.Bit,            isInStock)
           .query(`
             MERGE InternalProducts AS target
             USING (SELECT @SKU_ID AS SKU_ID) AS source
