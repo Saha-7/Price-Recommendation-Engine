@@ -2,8 +2,8 @@
 // Connects to Azure SQL using Azure CLI credential (local dev)
 // or Managed Identity (production/Azure App Service)
 
-import sql from 'mssql';
-import { AzureCliCredential, ManagedIdentityCredential } from '@azure/identity';
+const sql = require('mssql');
+const { AzureCliCredential, ManagedIdentityCredential } = require('@azure/identity');
 
 // ── Env vars ──────────────────────────────────────────────────
 const SERVER     = process.env.db_serverendpoint;
@@ -157,5 +157,4 @@ async function fetchCombinedData() {
   return { zohoRows, shopifyRows, combined };
 }
 
-export { fetchPurchasePrices, fetchShopifySKUs, fetchCombinedData };
-export default { fetchPurchasePrices, fetchShopifySKUs, fetchCombinedData };
+module.exports = { fetchPurchasePrices, fetchShopifySKUs, fetchCombinedData };
