@@ -1,13 +1,13 @@
 // src/internal_db_sync.js
 // Reads from Zoho + Shopify views → merges → upserts into InternalProducts table
-// isActive and isInStock are left as DEFAULT (0) until new view access is available
+// isActive and isInStock use dummy values (0/1) until real view access is available
 
-import 'dotenv/config';
-import sql from 'mssql';
-import { AzureCliCredential, ManagedIdentityCredential } from '@azure/identity';
-import { fetchCombinedData } from './services/azureSqlService.js';
+require('dotenv/config');
+const sql = require('mssql');
+const { AzureCliCredential, ManagedIdentityCredential } = require('@azure/identity');
+const { fetchCombinedData } = require('./services/azureSqlService.js');
 
-// ── SQL connection to db_tpstechautomata (target DB) ─────────
+// ── SQL connection to db_tpstechautomata ──────────────────────
 async function getTargetPool() {
   const credential = process.env.AZURE_ENV === 'production'
     ? new ManagedIdentityCredential({ clientId: process.env.db_userclientid })
@@ -30,6 +30,12 @@ async function getTargetPool() {
   return await sql.connect(config);
 }
 
+// ── Dummy value generator — alternates 0 and 1 ───────────────
+// Gives a realistic mix for demo purposes
+function dummyBit(index) {
+  return index % 2 === 0 ? 1 : 0;
+}
+
 // ── Main ──────────────────────────────────────────────────────
 async function syncInternalProducts() {
   try {
@@ -38,7 +44,7 @@ async function syncInternalProducts() {
     console.log(`\n📦 Products to sync: ${combined.length}`);
 
     // Step 2: Filter out rows with no SKU
-    const valid = combined.filter(r => r.SKU_ID);
+    const valid   = combined.filter(r => r.SKU_ID);
     const skipped = combined.length - valid.length;
     console.log(`   Valid  : ${valid.length}`);
     console.log(`   Skipped: ${skipped} (null SKU)`);
@@ -56,15 +62,23 @@ async function syncInternalProducts() {
     let failed   = 0;
     const failedRows = [];
 
-    for (const row of valid) {
+    for (let i = 0; i < valid.length; i++) {
+      const row = valid[i];
+
+      // Dummy isActive and isInStock — alternates per row for realistic demo
+      const isActive  = dummyBit(i);
+      const isInStock = dummyBit(i + 1); // offset by 1 so they differ from each other
+
       try {
         const result = await pool.request()
-          .input('SKU_ID',   sql.NVarChar(100),  row.SKU_ID)
-          .input('Title',    sql.NVarChar(500),   row.Title)
-          .input('Brand',    sql.NVarChar(200),   row.Brand)
-          .input('Category', sql.NVarChar(200),   row.Category)
-          .input('PP',       sql.Decimal(10, 2),  row.PP)
-          .input('SP',       sql.Decimal(10, 2),  row.SP)
+          .input('SKU_ID',    sql.NVarChar(100),  row.SKU_ID)
+          .input('Title',     sql.NVarChar(500),   row.Title)
+          .input('Brand',     sql.NVarChar(200),   row.Brand)
+          .input('Category',  sql.NVarChar(200),   row.Category)
+          .input('PP',        sql.Decimal(10, 2),  row.PP)
+          .input('SP',        sql.Decimal(10, 2),  row.SP)
+          .input('isActive',  sql.Bit,             isActive)
+          .input('isInStock', sql.Bit,             isInStock)
           .query(`
             MERGE InternalProducts AS target
             USING (SELECT @SKU_ID AS SKU_ID) AS source
@@ -78,8 +92,8 @@ async function syncInternalProducts() {
                 SP        = @SP,
                 UpdatedAt = GETDATE()
             WHEN NOT MATCHED THEN
-              INSERT (SKU_ID, Title, Brand, Category, PP, SP, UpdatedAt)
-              VALUES (@SKU_ID, @Title, @Brand, @Category, @PP, @SP, GETDATE());
+              INSERT (SKU_ID, Title, Brand, Category, PP, SP, isActive, isInStock, UpdatedAt)
+              VALUES (@SKU_ID, @Title, @Brand, @Category, @PP, @SP, @isActive, @isInStock, GETDATE());
           `);
 
         if (result.rowsAffected[0] === 1) inserted++;
