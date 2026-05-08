@@ -1,6 +1,7 @@
 // src/internal_db_sync.js
-// Reads from Zoho + Shopify views → merges → upserts into InternalProducts table
-// isActive and isInStock use dummy values (0/1) until real view access is available
+// Reads from Zoho + Shopify views → merges → bulk upserts into InternalProducts
+// Uses TVP (Table-Valued Parameter) — entire sync runs in seconds not hours
+// Token expiry is no longer an issue
 
 require('dotenv/config');
 const sql = require('mssql');
@@ -24,16 +25,48 @@ async function getTargetPool() {
       type: 'azure-active-directory-access-token',
       options: { token: tokenResponse.token }
     },
-    options: { encrypt: true, trustServerCertificate: false }
+    options: {
+      encrypt              : true,
+      trustServerCertificate: false,
+      requestTimeout       : 120_000, // 2 min for bulk MERGE
+    }
   };
 
   return await sql.connect(config);
 }
 
-// ── Dummy value generator — alternates 0 and 1 ───────────────
-// Gives a realistic mix for demo purposes
-function dummyBit(index) {
-  return index % 2 === 0 ? 1 : 0;
+// ── Dummy bit — random independent 0 or 1 ────────────────────
+// Gives all 4 combinations: 0-0, 0-1, 1-0, 1-1
+function randomBit() {
+  return Math.random() < 0.5 ? 0 : 1;
+}
+
+// ── Build TVP table from valid rows ──────────────────────────
+function buildTVP(valid) {
+  const table = new sql.Table('InternalProductsType');
+  table.columns.add('SKU_ID',    sql.NVarChar(100));
+  table.columns.add('Title',     sql.NVarChar(500));
+  table.columns.add('Brand',     sql.NVarChar(200));
+  table.columns.add('Category',  sql.NVarChar(200));
+  table.columns.add('PP',        sql.Decimal(10, 2));
+  table.columns.add('SP',        sql.Decimal(10, 2));
+  table.columns.add('isActive',  sql.Bit);
+  table.columns.add('isInStock', sql.Bit);
+
+  valid.forEach((row) => {
+    table.rows.add(
+      row.SKU_ID   ?? null,
+      row.Title    ?? null,
+      row.Brand    ?? null,
+      row.Category ?? null,
+      row.PP       ?? null,
+      row.SP       ?? null,
+      randomBit(),   // isActive  — independent
+      randomBit()    // isInStock — independent
+    );
+  });
+
+  return table;
 }
 
 // ── Main ──────────────────────────────────────────────────────
@@ -51,90 +84,52 @@ async function syncInternalProducts() {
     console.log(`   Valid  : ${valid.length}`);
     console.log(`   Skipped: ${skipped} (null SKU)`);
 
-    // Step 3: Connect to target SQL DB
+    // Step 3: Connect to SQL
     console.log('\n🔌 Connecting to db_tpstechautomata...');
     const pool = await getTargetPool();
     console.log('   Connected');
 
-    // Step 4: Upsert into InternalProducts
-    console.log('\n📤 Syncing into InternalProducts...');
+    // Step 4: Build TVP
+    console.log('\n🏗️  Building TVP...');
+    const tvp = buildTVP(valid);
+    console.log(`   TVP ready — ${valid.length} rows packed`);
 
-    let inserted = 0;
-    let updated  = 0;
-    let failed   = 0;
-    const failedRows = [];
+    // Step 5: Single bulk MERGE
+    console.log('\n📤 Running bulk MERGE into InternalProducts...');
+    const mergeStart = Date.now();
 
-    // ── Progress log every 500 rows ──────────────────────────
-    const PROGRESS_EVERY = 500;
+    const result = await pool.request()
+      .input('tvp', tvp)
+      .query(`
+        MERGE InternalProducts AS target
+        USING @tvp AS source
+          ON target.SKU_ID = source.SKU_ID
+        WHEN MATCHED THEN
+          UPDATE SET
+            Title     = source.Title,
+            Brand     = source.Brand,
+            Category  = source.Category,
+            PP        = source.PP,
+            SP        = source.SP,
+            UpdatedAt = GETDATE()
+        WHEN NOT MATCHED THEN
+          INSERT (SKU_ID, Title, Brand, Category, PP, SP, isActive, isInStock, UpdatedAt)
+          VALUES (source.SKU_ID, source.Title, source.Brand, source.Category,
+                  source.PP, source.SP, source.isActive, source.isInStock, GETDATE());
+      `);
 
-    for (let i = 0; i < valid.length; i++) {
-      const row = valid[i];
+    const mergeSec = ((Date.now() - mergeStart) / 1000).toFixed(1);
+    const totalSec = ((Date.now() - startTime)  / 1000).toFixed(1);
 
-      // Dummy isActive and isInStock — alternates per row for realistic demo
-      const isActive  = dummyBit(i);
-      const isInStock = dummyBit(i + 1); // offset by 1 so they differ from each other
-
-      try {
-        const result = await pool.request()
-          .input('SKU_ID',    sql.NVarChar(100),  row.SKU_ID)
-          .input('Title',     sql.NVarChar(500),  row.Title)
-          .input('Brand',     sql.NVarChar(200),  row.Brand)
-          .input('Category',  sql.NVarChar(200),  row.Category)
-          .input('PP',        sql.Decimal(10, 2), row.PP)
-          .input('SP',        sql.Decimal(10, 2), row.SP)
-          .input('isActive',  sql.Bit,            isActive)
-          .input('isInStock', sql.Bit,            isInStock)
-          .query(`
-            MERGE InternalProducts AS target
-            USING (SELECT @SKU_ID AS SKU_ID) AS source
-              ON target.SKU_ID = source.SKU_ID
-            WHEN MATCHED THEN
-              UPDATE SET
-                Title     = @Title,
-                Brand     = @Brand,
-                Category  = @Category,
-                PP        = @PP,
-                SP        = @SP,
-                UpdatedAt = GETDATE()
-            WHEN NOT MATCHED THEN
-              INSERT (SKU_ID, Title, Brand, Category, PP, SP, isActive, isInStock, UpdatedAt)
-              VALUES (@SKU_ID, @Title, @Brand, @Category, @PP, @SP, @isActive, @isInStock, GETDATE());
-          `);
-
-        if (result.rowsAffected[0] === 1) inserted++;
-        else updated++;
-
-      } catch (err) {
-        failed++;
-        failedRows.push({ SKU_ID: row.SKU_ID, Error: err.message });
-        console.warn(`   ⚠️  [${i + 1}/${valid.length}] Failed SKU=${row.SKU_ID} | ${err.message}`);
-      }
-
-      // ── Progress report every N rows ─────────────────────
-      if ((i + 1) % PROGRESS_EVERY === 0 || i + 1 === valid.length) {
-        const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-        console.log(`   ⏳ [${i + 1}/${valid.length}] Inserted:${inserted} Updated:${updated} Failed:${failed} | ${elapsed}s elapsed`);
-      }
-    }
-
-    const totalSec = ((Date.now() - startTime) / 1000).toFixed(1);
-
-    console.log(`\n🎉 Done! Total time: ${totalSec}s`);
-    console.log(`   Inserted: ${inserted}`);
-    console.log(`   Updated : ${updated}`);
-    console.log(`   Failed  : ${failed}`);
-
-    if (failedRows.length > 0) {
-      console.log('\n❌ Failed rows:');
-      failedRows.forEach(r =>
-        console.log(`   SKU=${r.SKU_ID} | Error=${r.Error}`)
-      );
-    }
+    console.log(`\n🎉 Done!`);
+    console.log(`   Rows touched : ${result.rowsAffected[0]}`);
+    console.log(`   Merge time   : ${mergeSec}s`);
+    console.log(`   Total time   : ${totalSec}s`);
 
     await pool.close();
 
   } catch (err) {
-    console.error('❌ Fatal error:', err.message);
+    console.error('\n❌ Fatal error:', err.message);
     process.exit(1);
   }
 }
