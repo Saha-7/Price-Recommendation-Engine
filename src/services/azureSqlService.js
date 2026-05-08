@@ -95,6 +95,14 @@ async function queryDB(database, queryString, accessToken) {
   }
 }
 
+// ── Strip invisible/non-printable unicode characters from SKU ─
+// Fixes cases like "‎CP-9020281-IN" which has a hidden unicode
+// character (U+200E left-to-right mark) prepended before "CP"
+function sanitizeSKU(sku) {
+  if (!sku) return null;
+  return sku.replace(/[^\x20-\x7E]/g, '').trim(); // keep only printable ASCII
+}
+
 // ── Fetch purchase prices from Zoho view ─────────────────────
 // Fetches col_Zoho_SKU, col_item_price_per_item, col_date
 // so we can pick the MOST RECENT price per SKU
@@ -148,17 +156,18 @@ function buildPriceMap(zohoRows) {
   const priceMap = new Map(); // key: col_Zoho_SKU (lowercase) → { price, date }
 
   for (const row of zohoRows) {
-    const key  = (row.col_Zoho_SKU || '').toLowerCase().trim();
+    const key  = sanitizeSKU(row.col_Zoho_SKU || '');
     if (!key) continue;
 
+    const normalizedKey = key.toLowerCase();
     const date = row.col_date ? new Date(row.col_date) : new Date(0);
 
-    if (!priceMap.has(key)) {
-      priceMap.set(key, { price: row.col_item_price_per_item, date });
+    if (!priceMap.has(normalizedKey)) {
+      priceMap.set(normalizedKey, { price: row.col_item_price_per_item, date });
     } else {
       // Keep the most recent entry
-      if (date > priceMap.get(key).date) {
-        priceMap.set(key, { price: row.col_item_price_per_item, date });
+      if (date > priceMap.get(normalizedKey).date) {
+        priceMap.set(normalizedKey, { price: row.col_item_price_per_item, date });
       }
     }
   }
@@ -169,32 +178,43 @@ function buildPriceMap(zohoRows) {
 
 // ── Combine both datasets ─────────────────────────────────────
 // Joins on SKU (Zoho col_Zoho_SKU ↔ Shopify sku)
+// SKUs are sanitized to strip invisible unicode characters before matching
 // FIX: price = SP (selling price), compare_at_price = MRP
 function combineData(zohoRows, shopifyRows) {
   const priceMap = buildPriceMap(zohoRows);
 
-  let ppMatched = 0;
-  let ppMissed  = 0;
+  let ppMatched    = 0;
+  let ppMissed     = 0;
+  let skusCleaned  = 0;
 
   const combined = shopifyRows.map(row => {
-    const key    = (row.sku || '').toLowerCase().trim();
-    const entry  = priceMap.get(key);
-    const pp     = entry ? entry.price : null;
+    const rawSKU   = row.sku ?? null;
+    const cleanSKU = sanitizeSKU(rawSKU);
+
+    // Track how many SKUs had invisible characters stripped
+    if (rawSKU && cleanSKU !== rawSKU) skusCleaned++;
+
+    const key   = (cleanSKU || '').toLowerCase();
+    const entry = priceMap.get(key);
+    const pp    = entry ? entry.price : null;
 
     if (pp !== null) ppMatched++;
     else             ppMissed++;
 
     return {
-      SKU_ID   : row.sku               ?? null,
+      SKU_ID   : cleanSKU,                        // ✅ sanitized SKU stored
       Title    : row.title             ?? null,
       Brand    : row.brand_name        ?? null,
       Category : row.shopify_type_name ?? null,
-      SP       : row.price             ?? null,  // ✅ FIXED: price = selling price
-      MRP      : row.compare_at_price  ?? null,  // ✅ FIXED: compare_at_price = MRP
-      PP       : pp,                             // most recent purchase price from Zoho
+      SP       : row.price             ?? null,   // ✅ FIXED: price = selling price
+      MRP      : row.compare_at_price  ?? null,   // ✅ FIXED: compare_at_price = MRP
+      PP       : pp,                              // most recent purchase price from Zoho
     };
   });
 
+  if (skusCleaned > 0) {
+    console.log(`   🧹 SKUs sanitized (invisible chars removed): ${skusCleaned}`);
+  }
   console.log(`   ✅ PP matched : ${ppMatched} rows`);
   console.log(`   ⚠️  PP missing : ${ppMissed} rows (no Zoho SKU match)`);
 
@@ -202,7 +222,7 @@ function combineData(zohoRows, shopifyRows) {
   if (ppMissed > 0) {
     console.log('   🔍 Sample unmatched Shopify SKUs (first 5):');
     shopifyRows
-      .filter(r => !priceMap.has((r.sku || '').toLowerCase().trim()))
+      .filter(r => !priceMap.has((sanitizeSKU(r.sku) || '').toLowerCase()))
       .slice(0, 5)
       .forEach(r => console.log(`      → SKU="${r.sku}" | Title="${r.title}"`));
   }
@@ -221,3 +241,239 @@ async function fetchCombinedData() {
 }
 
 module.exports = { fetchPurchasePrices, fetchShopifySKUs, fetchCombinedData };
+
+
+
+
+
+
+
+
+
+
+
+
+
+// // src/services/azureSqlService.js
+// // Connects to Azure SQL using Azure CLI credential (local dev)
+// // or Managed Identity (production/Azure App Service)
+
+// const sql = require('mssql');
+// const { AzureCliCredential, ManagedIdentityCredential } = require('@azure/identity');
+
+// // ── Env vars ──────────────────────────────────────────────────
+// const SERVER     = process.env.db_serverendpoint;
+// const DB_ZOHO    = process.env.db_zoho;
+// const DB_RETURNS = process.env.db_returns;
+// const CLIENT_ID  = process.env.db_userclientid;
+
+// if (!SERVER)     throw new Error('Missing env var: db_serverendpoint');
+// if (!DB_ZOHO)    throw new Error('Missing env var: db_zoho');
+// if (!DB_RETURNS) throw new Error('Missing env var: db_returns');
+
+// const SQL_SCOPE        = 'https://database.windows.net//.default';
+// const TOKEN_REFRESH_MS = 50 * 60 * 1000; // 50 minutes
+
+// // ── Token cache ───────────────────────────────────────────────
+// const tokenCache = {
+//   db_zoho_accesstoken:    { token: null, refreshTimer: null },
+//   db_returns_accesstoken: { token: null, refreshTimer: null },
+// };
+
+// // ── Get credential based on environment ──────────────────────
+// // Locally → AzureCliCredential (uses az login)
+// // Azure   → ManagedIdentityCredential (uses UAMI)
+// function getCredential() {
+//   if (process.env.AZURE_ENV === 'production' && CLIENT_ID) {
+//     return new ManagedIdentityCredential({ clientId: CLIENT_ID });
+//   }
+//   return new AzureCliCredential();
+// }
+
+// async function fetchFreshToken() {
+//   const credential = getCredential();
+//   const result = await credential.getToken(SQL_SCOPE);
+//   return result.token;
+// }
+
+// function scheduleTokenRefresh(cacheKey) {
+//   if (tokenCache[cacheKey].refreshTimer) {
+//     clearTimeout(tokenCache[cacheKey].refreshTimer);
+//   }
+//   tokenCache[cacheKey].refreshTimer = setTimeout(async () => {
+//     console.log(`🔄 Refreshing token for ${cacheKey}...`);
+//     try {
+//       tokenCache[cacheKey].token = await fetchFreshToken();
+//       console.log(`   ✅ Token refreshed for ${cacheKey}`);
+//     } catch (err) {
+//       console.error(`   ⚠️ Token refresh failed, keeping old token: ${err.message}`);
+//     }
+//     scheduleTokenRefresh(cacheKey);
+//   }, TOKEN_REFRESH_MS);
+// }
+
+// async function getToken(cacheKey) {
+//   if (!tokenCache[cacheKey].token) {
+//     console.log(`🔄 Getting initial token for ${cacheKey}...`);
+//     tokenCache[cacheKey].token = await fetchFreshToken();
+//     console.log(`   ✅ Token acquired for ${cacheKey}`);
+//     scheduleTokenRefresh(cacheKey);
+//   }
+//   return tokenCache[cacheKey].token;
+// }
+
+// // ── Build mssql config ────────────────────────────────────────
+// function buildConfig(database, accessToken) {
+//   return {
+//     server: SERVER,
+//     database,
+//     authentication: {
+//       type: 'azure-active-directory-access-token',
+//       options: { token: accessToken },
+//     },
+//     options: {
+//       encrypt: true,
+//       trustServerCertificate: false,
+//       connectTimeout: 30_000,
+//     },
+//   };
+// }
+
+// // ── Generic query helper ──────────────────────────────────────
+// async function queryDB(database, queryString, accessToken) {
+//   let pool;
+//   try {
+//     pool = await sql.connect(buildConfig(database, accessToken));
+//     const result = await pool.request().query(queryString);
+//     return result.recordset;
+//   } finally {
+//     if (pool) await pool.close();
+//   }
+// }
+
+// // ── Fetch purchase prices from Zoho view ─────────────────────
+// // Fetches col_Zoho_SKU, col_item_price_per_item, col_date
+// // so we can pick the MOST RECENT price per SKU
+// async function fetchPurchasePrices() {
+//   console.log(`📡 Fetching from ${DB_ZOHO} → vw_Zoho_Bills_Data...`);
+//   const accessToken = await getToken('db_zoho_accesstoken');
+//   const rows = await queryDB(
+//     DB_ZOHO,
+//     `SELECT col_Zoho_SKU, col_item_price_per_item, col_date
+//      FROM [dbo].[vw_Zoho_Bills_Data]
+//      WHERE col_status IN ('paid', 'partially_paid', 'open', 'overdue')
+//        AND col_Zoho_SKU IS NOT NULL`,
+//     accessToken
+//   );
+//   console.log(`   ✅ ${rows.length} rows from Zoho`);
+
+//   // ── DEBUG: sample Zoho SKUs ───────────────────────────────
+//   console.log('   🔍 Sample Zoho col_Zoho_SKU values:');
+//   rows.slice(0, 5).forEach(r =>
+//     console.log(`      → SKU="${r.col_Zoho_SKU}" | Price=${r.col_item_price_per_item} | Date=${r.col_date}`)
+//   );
+
+//   return rows;
+// }
+
+// // ── Fetch SKUs from Shopify view ──────────────────────────────
+// async function fetchShopifySKUs() {
+//   console.log(`📡 Fetching from ${DB_RETURNS} → vw_Shopify_Product_SKUs...`);
+//   const accessToken = await getToken('db_returns_accesstoken');
+//   const rows = await queryDB(
+//     DB_RETURNS,
+//     `SELECT title, shopify_type_name, sku, brand_name, price, compare_at_price
+//      FROM [dbo].[vw_Shopify_Product_SKUs]`,
+//     accessToken
+//   );
+//   console.log(`   ✅ ${rows.length} rows from Shopify`);
+
+//   // ── DEBUG: sample Shopify SKUs ────────────────────────────
+//   console.log('   🔍 Sample Shopify sku values:');
+//   rows.slice(0, 5).forEach(r =>
+//     console.log(`      → SKU="${r.sku}" | Title="${r.title}"`)
+//   );
+
+//   return rows;
+// }
+
+// // ── Build most-recent price map from Zoho ────────────────────
+// // 212k rows may have multiple bills per SKU — we keep only the
+// // most recent col_date entry so PP reflects the latest purchase price
+// function buildPriceMap(zohoRows) {
+//   const priceMap = new Map(); // key: col_Zoho_SKU (lowercase) → { price, date }
+
+//   for (const row of zohoRows) {
+//     const key  = (row.col_Zoho_SKU || '').toLowerCase().trim();
+//     if (!key) continue;
+
+//     const date = row.col_date ? new Date(row.col_date) : new Date(0);
+
+//     if (!priceMap.has(key)) {
+//       priceMap.set(key, { price: row.col_item_price_per_item, date });
+//     } else {
+//       // Keep the most recent entry
+//       if (date > priceMap.get(key).date) {
+//         priceMap.set(key, { price: row.col_item_price_per_item, date });
+//       }
+//     }
+//   }
+
+//   console.log(`   🗺️  Zoho priceMap size: ${priceMap.size} unique SKUs (most recent price kept)`);
+//   return priceMap;
+// }
+
+// // ── Combine both datasets ─────────────────────────────────────
+// // Joins on SKU (Zoho col_Zoho_SKU ↔ Shopify sku)
+// // FIX: price = SP (selling price), compare_at_price = MRP
+// function combineData(zohoRows, shopifyRows) {
+//   const priceMap = buildPriceMap(zohoRows);
+
+//   let ppMatched = 0;
+//   let ppMissed  = 0;
+
+//   const combined = shopifyRows.map(row => {
+//     const key    = (row.sku || '').toLowerCase().trim();
+//     const entry  = priceMap.get(key);
+//     const pp     = entry ? entry.price : null;
+
+//     if (pp !== null) ppMatched++;
+//     else             ppMissed++;
+
+//     return {
+//       SKU_ID   : row.sku               ?? null,
+//       Title    : row.title             ?? null,
+//       Brand    : row.brand_name        ?? null,
+//       Category : row.shopify_type_name ?? null,
+//       SP       : row.price             ?? null,  // ✅ FIXED: price = selling price
+//       MRP      : row.compare_at_price  ?? null,  // ✅ FIXED: compare_at_price = MRP
+//       PP       : pp,                             // most recent purchase price from Zoho
+//     };
+//   });
+
+//   console.log(`   ✅ PP matched : ${ppMatched} rows`);
+//   console.log(`   ⚠️  PP missing : ${ppMissed} rows (no Zoho SKU match)`);
+
+//   // ── DEBUG: show unmatched Shopify SKUs if any ─────────────
+//   if (ppMissed > 0) {
+//     console.log('   🔍 Sample unmatched Shopify SKUs (first 5):');
+//     shopifyRows
+//       .filter(r => !priceMap.has((r.sku || '').toLowerCase().trim()))
+//       .slice(0, 5)
+//       .forEach(r => console.log(`      → SKU="${r.sku}" | Title="${r.title}"`));
+//   }
+
+//   return combined;
+// }
+
+// // ── Public API ────────────────────────────────────────────────
+// async function fetchCombinedData() {
+//   console.log('🔄 Fetching from both SQL views...');
+//   const zohoRows    = await fetchPurchasePrices();
+//   const shopifyRows = await fetchShopifySKUs();
+//   const combined    = combineData(zohoRows, shopifyRows);
+//   console.log(`✅ Combined ${combined.length} products`);
+//   return { zohoRows, shopifyRows, combined };
+// }
+
+// module.exports = { fetchPurchasePrices, fetchShopifySKUs, fetchCombinedData };
