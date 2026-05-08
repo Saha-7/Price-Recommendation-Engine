@@ -41,8 +41,8 @@ function randomBit() {
   return Math.random() < 0.5 ? 0 : 1;
 }
 
-// ── Build TVP table from valid rows ──────────────────────────
-function buildTVP(valid) {
+// ── Build TVP table from deduped rows ────────────────────────
+function buildTVP(rows) {
   const table = new sql.Table('InternalProductsType');
   table.columns.add('SKU_ID',    sql.NVarChar(100));
   table.columns.add('Title',     sql.NVarChar(500));
@@ -53,7 +53,7 @@ function buildTVP(valid) {
   table.columns.add('isActive',  sql.Bit);
   table.columns.add('isInStock', sql.Bit);
 
-  valid.forEach((row) => {
+  rows.forEach((row) => {
     table.rows.add(
       row.SKU_ID   ?? null,
       row.Title    ?? null,
@@ -84,6 +84,14 @@ async function syncInternalProducts() {
     console.log(`   Valid  : ${valid.length}`);
     console.log(`   Skipped: ${skipped} (null SKU)`);
 
+    // Step 2b: Deduplicate by SKU_ID — keep last occurrence
+    const dedupMap = new Map();
+    for (const row of valid) {
+      dedupMap.set(row.SKU_ID, row); // later entry overwrites earlier
+    }
+    const deduped = [...dedupMap.values()];
+    console.log(`   Deduped: ${deduped.length} unique SKUs (removed ${valid.length - deduped.length} duplicates)`);
+
     // Step 3: Connect to SQL
     console.log('\n🔌 Connecting to db_tpstechautomata...');
     const pool = await getTargetPool();
@@ -91,8 +99,8 @@ async function syncInternalProducts() {
 
     // Step 4: Build TVP
     console.log('\n🏗️  Building TVP...');
-    const tvp = buildTVP(valid);
-    console.log(`   TVP ready — ${valid.length} rows packed`);
+    const tvp = buildTVP(deduped);
+    console.log(`   TVP ready — ${deduped.length} rows packed`);
 
     // Step 5: Single bulk MERGE
     console.log('\n📤 Running bulk MERGE into InternalProducts...');
