@@ -92,6 +92,16 @@ async function syncInternalProducts() {
     const deduped = [...dedupMap.values()];
     console.log(`   Deduped: ${deduped.length} unique SKUs (removed ${valid.length - deduped.length} duplicates)`);
 
+    // ── DEBUG: show which SKUs were collapsed by dedup ───────
+    if (valid.length !== deduped.length) {
+      const dedupedSet = new Set(deduped.map(r => r.SKU_ID));
+      const removed    = valid.filter(r => !dedupedSet.has(r.SKU_ID));
+      console.log('   🔍 Deduped-out rows (kept last occurrence):');
+      removed.forEach(r =>
+        console.log(`      → SKU="${r.SKU_ID}" | Title="${r.Title}"`)
+      );
+    }
+
     // Step 3: Connect to SQL
     console.log('\n🔌 Connecting to db_tpstechautomata...');
     const pool = await getTargetPool();
@@ -103,6 +113,8 @@ async function syncInternalProducts() {
     console.log(`   TVP ready — ${deduped.length} rows packed`);
 
     // Step 5: Single bulk MERGE
+    // GROUP BY in USING clause deduplicates source on SQL side as final safety net
+    // preventing "target row matches more than one source row" errors
     console.log('\n📤 Running bulk MERGE into InternalProducts...');
     const mergeStart = Date.now();
 
@@ -110,7 +122,19 @@ async function syncInternalProducts() {
       .input('tvp', tvp)
       .query(`
         MERGE InternalProducts AS target
-        USING @tvp AS source
+        USING (
+          SELECT
+            SKU_ID,
+            MAX(Title)              AS Title,
+            MAX(Brand)              AS Brand,
+            MAX(Category)           AS Category,
+            MAX(PP)                 AS PP,
+            MAX(SP)                 AS SP,
+            CAST(MAX(CAST(isActive  AS INT)) AS BIT) AS isActive,
+            CAST(MAX(CAST(isInStock AS INT)) AS BIT) AS isInStock
+          FROM @tvp
+          GROUP BY SKU_ID
+        ) AS source
           ON target.SKU_ID = source.SKU_ID
         WHEN MATCHED THEN
           UPDATE SET
