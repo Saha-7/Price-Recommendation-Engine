@@ -137,7 +137,7 @@ async function fetchShopifySKUs() {
     `SELECT title, shopify_type_name, sku, brand_name, price, compare_at_price
      FROM [dbo].[vw_Shopify_Product_SKUs]`,
     accessToken
-  );
+  ); 
   console.log(`   ✅ ${rows.length} rows from Shopify`);
 
   // ── DEBUG: sample Shopify SKUs ────────────────────────────

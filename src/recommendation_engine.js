@@ -9,31 +9,36 @@
 //    2. Reads CompetitorPrices — only in-stock entries
 //    3. Matches on SKU (InternalProducts.SKU_ID = CompetitorPrices.SKU)
 //    4. Skips internal products with no competitor match
-//    5. Calculates: RecommendedPrice = PP × (1 + COST_OF_BUSINESS) × (1 + MIN_PROFIT_MARGIN)
-//    6. Upserts results into PriceRecommendations table
+//    5. Calculates RecommendedSP using additive formula:
+//         PP × (1 + GST + COST_OF_BUSINESS + MIN_PROFIT_MARGIN)
+//    6. Updates RecommendedSP column directly in InternalProducts
 //
 //  Prototype constants (manager confirmed):
+//    GST               = 18%
 //    COST_OF_BUSINESS  = 7%
 //    MIN_PROFIT_MARGIN = 5%
+//
+//  Formula example — PP = ₹1000:
+//    1000 × (1 + 0.18 + 0.07 + 0.05)
+//    = 1000 × 1.30
+//    = ₹1300
 // ─────────────────────────────────────────────────────────────
 
 require('dotenv').config();
-const sql              = require('mssql');
-const { v4: uuidv4 }   = require('uuid');
+const sql            = require('mssql');
 const { AzureCliCredential, ManagedIdentityCredential } = require('@azure/identity');
 
 // ── Prototype constants ───────────────────────────────────────
+const GST               = 0.18;  // 18%
 const COST_OF_BUSINESS  = 0.07;  // 7%
 const MIN_PROFIT_MARGIN = 0.05;  // 5%
 
-// ── In-stock signal words ─────────────────────────────────────
-// CompetitorPrices.StockStatus can be:
-//   "In Stock" | "Hurry, Only X left." | "Out of Stock"
-// We treat anything that is NOT "Out of Stock" as available.
+// ── In-stock signal ───────────────────────────────────────────
+// StockStatus values: "In Stock" | "Hurry, Only X left." | "Out of Stock"
+// Anything that is NOT "out of stock" is treated as available.
 function isInStock(stockStatus) {
   if (!stockStatus) return false;
-  const s = stockStatus.toLowerCase().trim();
-  return s !== 'out of stock';
+  return stockStatus.toLowerCase().trim() !== 'out of stock';
 }
 
 // ── SQL connection ────────────────────────────────────────────
@@ -46,7 +51,7 @@ async function getSqlPool() {
     'https://database.windows.net/.default'
   );
 
-  const config = {
+  return await sql.connect({
     server  : process.env.db_serverendpoint,
     database: 'db_tpstechautomata',
     authentication: {
@@ -58,68 +63,54 @@ async function getSqlPool() {
       trustServerCertificate: false,
       requestTimeout       : 60_000,
     },
-  };
-
-  return await sql.connect(config);
+  });
 }
 
-// ── Step 1: Load internal products eligible for recommendation ─
-// Conditions:
-//   - PP is not null          (we need a cost base for the formula)
-//   - isActive = 1            (product is live on the store)
-//   - isInStock = 1           (we are currently selling it)
+// ── Step 1: Load eligible internal products ───────────────────
+// Only products where:
+//   - PP is not null  (need cost base for formula)
+//   - isActive = 1    (live on the store)
+//   - isInStock = 1   (currently selling)
 async function loadInternalProducts(pool) {
   console.log('📦 Loading internal products (PP not null, active, in stock)...');
 
   const result = await pool.request().query(`
-    SELECT
-      SKU_ID,
-      Title,
-      PP,
-      SP,
-      Category
-    FROM InternalProducts
-    WHERE PP        IS NOT NULL
-      AND isActive  = 1
-      AND isInStock = 1
+    SELECT SKU_ID, Title, PP, SP, Category
+    FROM   InternalProducts
+    WHERE  PP        IS NOT NULL
+      AND  isActive  = 1
+      AND  isInStock = 1
   `);
 
   console.log(`   ✅ ${result.recordset.length} eligible internal products`);
   return result.recordset;
 }
 
-// ── Step 2: Load competitor prices (in-stock only) ────────────
-// We load ALL rows and filter in JS so we can group by SKU
+// ── Step 2: Load competitor prices ───────────────────────────
 async function loadCompetitorPrices(pool) {
   console.log('🏪 Loading competitor prices...');
 
   const result = await pool.request().query(`
-    SELECT
-      SKU,
-      CompetitorPrice,
-      StockStatus,
-      StoreName
-    FROM CompetitorPrices
-    WHERE CompetitorPrice IS NOT NULL
+    SELECT SKU, CompetitorPrice, StockStatus, StoreName
+    FROM   CompetitorPrices
+    WHERE  CompetitorPrice IS NOT NULL
   `);
 
   console.log(`   ✅ ${result.recordset.length} competitor price rows`);
   return result.recordset;
 }
 
-// ── Step 3: Build competitor map ──────────────────────────────
-// Groups competitor rows by SKU (uppercase for case-insensitive match)
-// Only keeps in-stock entries per the isInStock() helper above
-// Returns: Map<SKU_uppercase → [ { price, storeName } ]>
+// ── Step 3: Build competitor lookup map ───────────────────────
+// Key   : SKU uppercased (case-insensitive matching)
+// Value : array of in-stock { price, storeName }
 function buildCompetitorMap(competitorRows) {
   const map = new Map();
 
   for (const row of competitorRows) {
     if (!row.SKU) continue;
-    if (!isInStock(row.StockStatus)) continue;  // skip out-of-stock
+    if (!isInStock(row.StockStatus)) continue;
 
     const key = row.SKU.trim().toUpperCase();
-
     if (!map.has(key)) map.set(key, []);
     map.get(key).push({
       price    : parseFloat(row.CompetitorPrice),
@@ -127,16 +118,18 @@ function buildCompetitorMap(competitorRows) {
     });
   }
 
-  console.log(`   🗺️  ${map.size} unique SKUs with at least one in-stock competitor price`);
+  console.log(`   🗺️  ${map.size} unique SKUs with at least one in-stock competitor`);
   return map;
 }
 
 // ── Step 4: Calculate recommended price ───────────────────────
-// Formula: PP × (1 + COST_OF_BUSINESS) × (1 + MIN_PROFIT_MARGIN)
-// Example: PP=1000 → 1000 × 1.07 × 1.05 = ₹1123.50
+// Additive formula — each % is applied flat on PP, not compounded:
+//   RecommendedSP = PP × (1 + GST + COST_OF_BUSINESS + MIN_PROFIT_MARGIN)
+//                 = PP × (1 + 0.18 + 0.07 + 0.05)
+//                 = PP × 1.30
 function calculateRecommendedPrice(pp) {
   return parseFloat(
-    (pp * (1 + COST_OF_BUSINESS) * (1 + MIN_PROFIT_MARGIN)).toFixed(2)
+    (pp * (1 + GST + COST_OF_BUSINESS + MIN_PROFIT_MARGIN)).toFixed(2)
   );
 }
 
@@ -151,45 +144,43 @@ function generateRecommendations(internalProducts, competitorMap) {
     const key = (product.SKU_ID || '').trim().toUpperCase();
     const competitorEntries = competitorMap.get(key);
 
-    // Skip if no competitor has this SKU in stock
+    // Skip if no competitor carries this SKU in stock
     if (!competitorEntries || competitorEntries.length === 0) {
       skippedNoMatch++;
       continue;
     }
 
-    // Find the lowest competitor price
+    // Lowest in-stock competitor price
     const lowestEntry = competitorEntries.reduce((a, b) =>
       a.price < b.price ? a : b
     );
 
-    const recommendedPrice = calculateRecommendedPrice(product.PP);
+    const pp               = parseFloat(product.PP);
+    const recommendedPrice = calculateRecommendedPrice(pp);
 
     recommendations.push({
-      RecommendationID      : uuidv4(),
-      SKU_ID                : product.SKU_ID,
-      ProductName           : product.Title,
-      PP                    : parseFloat(product.PP),
-      CurrentSP             : product.SP ? parseFloat(product.SP) : null,
-      RecommendedPrice      : recommendedPrice,
-      LowestCompetitorPrice : lowestEntry.price,
-      LowestCompetitorStore : lowestEntry.storeName,
-      CompetitorCount       : competitorEntries.length,
-      CostOfBusiness        : COST_OF_BUSINESS,
-      MinProfitMargin       : MIN_PROFIT_MARGIN,
+      SKU_ID               : product.SKU_ID,
+      ProductName          : product.Title,
+      PP                   : pp,
+      CurrentSP            : product.SP ? parseFloat(product.SP) : null,
+      RecommendedPrice     : recommendedPrice,
+      LowestCompetitorPrice: lowestEntry.price,
+      LowestCompetitorStore: lowestEntry.storeName,
+      CompetitorCount      : competitorEntries.length,
     });
   }
 
-  console.log(`   ✅ Recommendations generated : ${recommendations.length}`);
+  console.log(`   ✅ Recommendations generated   : ${recommendations.length}`);
   console.log(`   ⏭️  Skipped (no competitor match): ${skippedNoMatch}`);
 
   // Preview first 5
   console.log('\n   📋 Sample recommendations:');
-  recommendations.slice(0, 5).forEach(r => {
+  recommendations.slice(0, 8).forEach(r => {
     const diff = r.CurrentSP
       ? ` | CurrentSP=₹${r.CurrentSP} | Diff=₹${(r.RecommendedPrice - r.CurrentSP).toFixed(2)}`
       : '';
     console.log(
-      `   → ${r.SKU_ID} | PP=₹${r.PP} | Recommended=₹${r.RecommendedPrice}` +
+      `   → ${r.SKU_ID} | PP=₹${r.PP} | RecommendedSP=₹${r.RecommendedPrice}` +
       ` | LowestCompetitor=₹${r.LowestCompetitorPrice} (${r.LowestCompetitorStore})` +
       diff
     );
@@ -198,9 +189,8 @@ function generateRecommendations(internalProducts, competitorMap) {
   return recommendations;
 }
 
-// ── Step 6: Upsert into PriceRecommendations ──────────────────
-// MERGE on SKU_ID — re-running the engine updates existing rows
-async function upsertRecommendations(pool, recommendations) {
+// ── Step 6: Update RecommendedSP in InternalProducts ─────────
+async function updateRecommendedSP(pool, recommendations) {
   console.log('\n📤 Updating RecommendedSP in InternalProducts...');
 
   let updated = 0;
@@ -209,8 +199,8 @@ async function upsertRecommendations(pool, recommendations) {
   for (const row of recommendations) {
     try {
       await pool.request()
-        .input('SKU_ID',           sql.NVarChar(100),  row.SKU_ID)
-        .input('RecommendedSP',    sql.Decimal(10, 2), row.RecommendedPrice)
+        .input('SKU_ID',        sql.NVarChar(100),  row.SKU_ID)
+        .input('RecommendedSP', sql.Decimal(10, 2), row.RecommendedPrice)
         .query(`
           UPDATE InternalProducts
           SET    RecommendedSP = @RecommendedSP,
@@ -232,10 +222,13 @@ async function upsertRecommendations(pool, recommendations) {
 async function run() {
   const startTime = Date.now();
 
+  const totalMultiplier = 1 + GST + COST_OF_BUSINESS + MIN_PROFIT_MARGIN;
+
   console.log('🚀 Recommendation Engine starting...');
+  console.log(`   GST               : ${GST * 100}%`);
   console.log(`   Cost of Business  : ${COST_OF_BUSINESS * 100}%`);
   console.log(`   Min Profit Margin : ${MIN_PROFIT_MARGIN * 100}%`);
-  console.log(`   Formula           : PP × ${1 + COST_OF_BUSINESS} × ${1 + MIN_PROFIT_MARGIN}\n`);
+  console.log(`   Formula           : PP × ${totalMultiplier} (e.g. ₹1000 → ₹${(1000 * totalMultiplier).toFixed(2)})\n`);
 
   let pool;
   try {
@@ -243,29 +236,22 @@ async function run() {
     pool = await getSqlPool();
     console.log('   Connected\n');
 
-    // Steps 1 & 2: Load data
     const internalProducts = await loadInternalProducts(pool);
     const competitorRows   = await loadCompetitorPrices(pool);
-
-    // Step 3: Build lookup map
-    const competitorMap = buildCompetitorMap(competitorRows);
-
-    // Step 4 & 5: Generate
-    const recommendations = generateRecommendations(internalProducts, competitorMap);
+    const competitorMap    = buildCompetitorMap(competitorRows);
+    const recommendations  = generateRecommendations(internalProducts, competitorMap);
 
     if (recommendations.length === 0) {
       console.log('\n⚠️  No recommendations generated — check that SKUs match between tables.');
       return;
     }
 
-    // Step 6: Save to SQL
-    await upsertRecommendations(pool, recommendations);
+    await updateRecommendedSP(pool, recommendations);
 
     const totalSec = ((Date.now() - startTime) / 1000).toFixed(1);
     console.log(`\n🎉 Done in ${totalSec}s`);
-    console.log(`   Results saved to: PriceRecommendations table`);
-    console.log(`\n   To view in SSMS:`);
-    console.log(`   SELECT * FROM PriceRecommendations ORDER BY GeneratedAt DESC`);
+    console.log(`\n   To verify in SSMS:`);
+    console.log(`   SELECT SKU_ID, PP, SP, RecommendedSP FROM InternalProducts WHERE RecommendedSP IS NOT NULL`);
 
   } catch (err) {
     console.error('\n❌ Fatal error:', err.message);
