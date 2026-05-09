@@ -123,14 +123,27 @@ function buildCompetitorMap(competitorRows) {
 }
 
 // ── Step 4: Calculate recommended price ───────────────────────
-// Additive formula — each % is applied flat on PP, not compounded:
-//   RecommendedSP = PP × (1 + GST + COST_OF_BUSINESS + MIN_PROFIT_MARGIN)
-//                 = PP × (1 + 0.18 + 0.07 + 0.05)
-//                 = PP × 1.30
-function calculateRecommendedPrice(pp) {
-  return parseFloat(
+// Phase 1 — Base floor: PP × (1 + GST + COB + margin) = PP × 1.30
+// Phase 2 — Optimize:   if competitor is higher, go to 99% of their price
+//           but only if 99% of competitor > base floor (never sell below cost)
+function calculateRecommendedPrice(pp, lowestCompetitorPrice) {
+  const basePrice = parseFloat(
     (pp * (1 + GST + COST_OF_BUSINESS + MIN_PROFIT_MARGIN)).toFixed(2)
   );
+
+  // No room to optimize — competitor is at or below our cost floor
+  if (lowestCompetitorPrice <= basePrice) {
+    return { recommendedSP: basePrice, pricingStrategy: 'floor' };
+  }
+
+  // Competitor is higher — try to go 1% below them
+  const target = parseFloat((lowestCompetitorPrice * 0.99).toFixed(2));
+
+  if (target > basePrice) {
+    return { recommendedSP: target, pricingStrategy: 'optimized' };
+  }
+
+  return { recommendedSP: basePrice, pricingStrategy: 'floor' };
 }
 
 // ── Step 5: Generate recommendations ─────────────────────────
