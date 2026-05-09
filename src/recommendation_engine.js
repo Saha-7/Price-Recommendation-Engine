@@ -147,55 +147,69 @@ function calculateRecommendedPrice(pp, lowestCompetitorPrice) {
 }
 
 // ── Step 5: Generate recommendations ─────────────────────────
+// ── Step 5: Generate recommendations ─────────────────────────
 function generateRecommendations(internalProducts, competitorMap) {
   console.log('\n🧮 Generating recommendations...');
 
   const recommendations = [];
-  let skippedNoMatch = 0;
+  let skippedNoMatch  = 0;
+  let strategyFloor   = 0;
+  let strategyOptimized = 0;
 
   for (const product of internalProducts) {
     const key = (product.SKU_ID || '').trim().toUpperCase();
     const competitorEntries = competitorMap.get(key);
 
-    // Skip if no competitor carries this SKU in stock
     if (!competitorEntries || competitorEntries.length === 0) {
       skippedNoMatch++;
       continue;
     }
 
-    // Lowest in-stock competitor price
     const lowestEntry = competitorEntries.reduce((a, b) =>
       a.price < b.price ? a : b
     );
 
-    const pp               = parseFloat(product.PP);
-    const recommendedPrice = calculateRecommendedPrice(pp);
+    const pp = parseFloat(product.PP);
+    const { recommendedSP, pricingStrategy } = calculateRecommendedPrice(pp, lowestEntry.price);
+
+    const baseFloor = parseFloat(
+      (pp * (1 + GST + COST_OF_BUSINESS + MIN_PROFIT_MARGIN)).toFixed(2)
+    );
+    const extraProfit = parseFloat((recommendedSP - baseFloor).toFixed(2));
+
+    if (pricingStrategy === 'floor')     strategyFloor++;
+    if (pricingStrategy === 'optimized') strategyOptimized++;
 
     recommendations.push({
       SKU_ID               : product.SKU_ID,
       ProductName          : product.Title,
       PP                   : pp,
       CurrentSP            : product.SP ? parseFloat(product.SP) : null,
-      RecommendedPrice     : recommendedPrice,
+      BaseFloor            : baseFloor,
+      RecommendedPrice     : recommendedSP,
       LowestCompetitorPrice: lowestEntry.price,
       LowestCompetitorStore: lowestEntry.storeName,
       CompetitorCount      : competitorEntries.length,
+      PricingStrategy      : pricingStrategy,
+      ExtraProfit          : extraProfit,
     });
   }
 
   console.log(`   ✅ Recommendations generated   : ${recommendations.length}`);
   console.log(`   ⏭️  Skipped (no competitor match): ${skippedNoMatch}`);
+  console.log(`\n   📊 Pricing strategy breakdown:`);
+  console.log(`      🔼 Optimized (99% of competitor) : ${strategyOptimized}`);
+  console.log(`      🔒 Floor    (PP × 1.30 used)     : ${strategyFloor}`);
 
-  // Preview first 5
   console.log('\n   📋 Sample recommendations:');
   recommendations.slice(0, 8).forEach(r => {
-    const diff = r.CurrentSP
-      ? ` | CurrentSP=₹${r.CurrentSP} | Diff=₹${(r.RecommendedPrice - r.CurrentSP).toFixed(2)}`
-      : '';
+    const tag = r.PricingStrategy === 'optimized' ? '🔼' : '🔒';
     console.log(
-      `   → ${r.SKU_ID} | PP=₹${r.PP} | RecommendedSP=₹${r.RecommendedPrice}` +
-      ` | LowestCompetitor=₹${r.LowestCompetitorPrice} (${r.LowestCompetitorStore})` +
-      diff
+      `   ${tag} ${r.SKU_ID}\n` +
+      `      PP=₹${r.PP} | Floor=₹${r.BaseFloor} | RecommendedSP=₹${r.RecommendedPrice}\n` +
+      `      Competitor=₹${r.LowestCompetitorPrice} (${r.LowestCompetitorStore})` +
+      ` | ExtraProfit=₹${r.ExtraProfit}` +
+      (r.CurrentSP ? ` | CurrentSP=₹${r.CurrentSP}` : '')
     );
   });
 
