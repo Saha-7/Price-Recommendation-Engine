@@ -13,7 +13,9 @@
   "dependencies": {
     "@azure/cosmos": "^4.9.3",
     "@azure/identity": "^4.13.1",
+    "cors": "^2.8.6",
     "dotenv": "^17.4.2",
+    "express": "^5.2.1",
     "mssql": "^12.5.1",
     "playwright": "^1.59.1",
     "uuid": "^14.0.0"
