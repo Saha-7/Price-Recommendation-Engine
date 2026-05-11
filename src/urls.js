@@ -39,12 +39,12 @@ const STORES = [
     parser: require('./parsers/pickpcparts'),
     categories: [
       { slug: 'cpu-processor', url: 'https://pickpcparts.in/processors/' },
-      //{ slug: 'ram-memory',    url: 'https://pickpcparts.in/rams/' },
-      //{ slug: 'motherboards',  url: 'https://pickpcparts.in/motherboards/' },
-     // { slug: 'graphic-cards', url: 'https://pickpcparts.in/graphics_cards/' },
-      //{ slug: 'storages',      url: 'https://pickpcparts.in/storages/' },
-      { slug:'Keyboards', url: 'https://pickpcparts.in/keyboards/' },
-      { slug:'Mouse', url: 'https://pickpcparts.in/mice/' },
+     // { slug: 'ram-memory',    url: 'https://pickpcparts.in/rams/', maxProducts: 60 },
+      //{ slug: 'motherboards',  url: 'https://pickpcparts.in/motherboards/', maxProducts: 100 },
+     // { slug: 'graphic-cards', url: 'https://pickpcparts.in/graphics_cards/', maxProducts: 100 },
+     // { slug: 'storages',      url: 'https://pickpcparts.in/storages/', maxProducts: 60 },
+     // { slug:'Keyboards', url: 'https://pickpcparts.in/keyboards/' },
+     // { slug:'Mouse', url: 'https://pickpcparts.in/mice/' },
     ],
   },
 
