@@ -9,29 +9,29 @@
 // ─────────────────────────────────────────────────────────────
 
 const STORES = [
-  {
-    name: 'Primeabgb',
-    freeScrapable: false,  // Cloudflare protected — needs Bright Data
-    parser: require('./parsers/primeabgb'),
-    categories: [
-      { slug: 'cpu-processor', url: 'https://www.primeabgb.com/buy-online-price-india/cpu-processor/' },
-      //{ slug: 'motherboards',  url: 'https://www.primeabgb.com/buy-online-price-india/motherboards/' },
-      // { slug: 'graphic-cards', url: 'https://www.primeabgb.com/buy-online-price-india/graphic-cards-gpu/' },
-      {slug: 'HDD',      url: 'https://www.primeabgb.com/buy-online-price-india/internal-hard-drive/' },
-      // { slug: 'ram-memory',    url: 'https://www.primeabgb.com/buy-online-price-india/ram-memory/' },
-    ],
-  },
+  // {
+  //   name: 'Primeabgb',
+  //   freeScrapable: false,  // Cloudflare protected — needs Bright Data
+  //   parser: require('./parsers/primeabgb'),
+  //   categories: [
+  //     { slug: 'cpu-processor', url: 'https://www.primeabgb.com/buy-online-price-india/cpu-processor/' },
+  //     //{ slug: 'motherboards',  url: 'https://www.primeabgb.com/buy-online-price-india/motherboards/' },
+  //     // { slug: 'graphic-cards', url: 'https://www.primeabgb.com/buy-online-price-india/graphic-cards-gpu/' },
+  //     {slug: 'HDD',      url: 'https://www.primeabgb.com/buy-online-price-india/internal-hard-drive/' },
+  //     // { slug: 'ram-memory',    url: 'https://www.primeabgb.com/buy-online-price-india/ram-memory/' },
+  //   ],
+  // },
 
-  {
-    name: 'MDComputers',
-    freeScrapable: false,  // Had 502 errors without Bright Data — keep paid
-    parser: require('./parsers/mdcomputers'),
-    categories: [
-      { slug: 'cpu-processor', url: 'https://mdcomputers.in/catalog/processor' },
-      //{ slug: 'motherboards',  url: 'https://mdcomputers.in/catalog/motherboard' },
-      //{ slug: 'ram-memory',    url: 'https://mdcomputers.in/catalog/ram' },
-    ],
-  },
+  // {
+  //   name: 'MDComputers',
+  //   freeScrapable: false,  // Had 502 errors without Bright Data — keep paid
+  //   parser: require('./parsers/mdcomputers'),
+  //   categories: [
+  //     { slug: 'cpu-processor', url: 'https://mdcomputers.in/catalog/processor' },
+  //     //{ slug: 'motherboards',  url: 'https://mdcomputers.in/catalog/motherboard' },
+  //     //{ slug: 'ram-memory',    url: 'https://mdcomputers.in/catalog/ram' },
+  //   ],
+  // },
 
   {
     name: 'pickpcparts',
