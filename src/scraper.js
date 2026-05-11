@@ -432,6 +432,84 @@ async function scrapeCategory(store, category) {
   console.log(`     Price → ${paths.priceOutput}`);
 }
 
+// Only for demo quick scraping
+// async function scrapeCategory(store, category) {
+//   const { name: storeName, freeScrapable } = store;
+
+//   // ── DEMO LIMIT — maxProducts caps scraping for large categories ──
+//   // Set maxProducts in urls.js for categories with 300+ products
+//   // Remove or set to Infinity for full production scrape
+//   const { slug, url: startUrl, maxProducts = Infinity } = category;
+
+//   console.log(`\n${'─'.repeat(60)}`);
+//   console.log(`🏪 Store: ${storeName}  📂 Category: ${slug}  [${freeScrapable ? '🆓 free-first' : '💳 paid-only'}]`);
+//   // ── Show limit in header if active ──────────────────────────
+//   if (maxProducts !== Infinity) {
+//     console.log(`  ⚠️  DEMO MODE — capped at ${maxProducts} products`);
+//   }
+//   console.log(`${'─'.repeat(60)}`);
+
+//   const paths = getPaths(storeName, slug);
+//   ensureDir(paths.dir);
+
+//   const productUrls = await collectUrlsForCategory(store, startUrl, paths.urlsCache);
+//   console.log(`  ✅ ${productUrls.size} product URLs total`);
+
+//   const visited = new Set(readJson(paths.visitedCache, []));
+//   const total   = productUrls.size;
+//   let done      = visited.size;
+
+//   if (visited.size > 0) {
+//     console.log(`  ♻️  Resuming: ${visited.size} done, ${total - visited.size} remaining`);
+//   }
+
+//   let freeCount = 0;
+//   let paidCount = 0;
+
+//   for (const productUrl of productUrls) {
+//     if (visited.has(productUrl)) continue;
+
+//     // ── DEMO LIMIT — stop once cap is reached ────────────────
+//     if (done >= maxProducts) {
+//       console.log(`\n  ⏹️  Demo limit reached (${maxProducts}) — skipping remaining ${total - done} products`);
+//       break;
+//     }
+//     // ─────────────────────────────────────────────────────────
+
+//     done++;
+//     process.stdout.write(`  🛒 [${done}/${maxProducts === Infinity ? total : maxProducts}] `);
+
+//     const product = await scrapeProductSafe(store, productUrl);
+
+//     if (product?.name) {
+//       appendProduct(paths.fullOutput, product);
+//       rebuildPriceFile(paths.fullOutput, paths.priceOutput);
+//       const via = product.scrapedVia === 'free' ? '🆓' : '💳';
+//       console.log(`${via} ${product.name.substring(0, 55)}`);
+
+//       if (product.scrapedVia === 'free') freeCount++;
+//       else paidCount++;
+//     } else {
+//       console.log(`⚠️  No data — ${productUrl}`);
+//     }
+
+//     // Always save visited — even on failure — so we don't retry endlessly
+//     visited.add(productUrl);
+//     writeJson(paths.visitedCache, [...visited]);
+
+//     await new Promise(r => setTimeout(r, freeCount > paidCount ? 2000 : 1500));
+//   }
+
+//   console.log(`\n  🏁 ${storeName}/${slug} complete: ${done} products`);
+//   // ── Show demo note in footer if limit was active ─────────
+//   if (maxProducts !== Infinity) {
+//     console.log(`     ⚠️  Demo mode — scraped ${done}/${total} total available`);
+//   }
+//   console.log(`     🆓 Free: ${freeCount}  💳 Bright Data: ${paidCount}`);
+//   console.log(`     Full  → ${paths.fullOutput}`);
+//   console.log(`     Price → ${paths.priceOutput}`);
+// }
+
 // ─────────────────────────────────────────────────────────────
 //  MAIN
 // ─────────────────────────────────────────────────────────────
