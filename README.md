@@ -59,6 +59,36 @@ node src/cleanup_mapper.js
 ```
 Reads from Cosmos, normalizes all store-specific field names into a standard structure, and prints a preview. SQL insert logic is a TODO — will be wired up once the external SQL DB is ready.
 
+
+### 4. Sync internal products from Zoho + Shopify
+```bash
+node src/internal_db_sync.js
+```
+Reads purchase prices from Zoho bills view and SKUs/titles from Shopify view, combines them, and bulk upserts into **InternalProducts** table in Azure SQL. Uses TVP for performance — ~7700 products in under 2 minutes.
+
+### 5. Run the recommendation engine
+```bash
+node src/recommendation_engine.js
+```
+Reads InternalProducts (PP not null, isActive=1, isInStock=1) and CompetitorPrices (in-stock only), matches on SKU, and calculates RecommendedSP using:
+- **Floor formula:** `PP × (1 + 0.18 GST + 0.07 CoB + 0.05 margin) = PP × 1.30`
+- **Optimized:** if competitor price > floor → `RecommendedSP = competitor × 0.99`
+
+Writes `RecommendedSP` directly into the `InternalProducts` table.
+
+### 6. Start the API server
+```bash
+node src/api_server.js
+```
+Starts Express server on port 3001. Serves `/api/recommendations` — joins InternalProducts + CompetitorPrices and returns matched products with recommended prices to the frontend.
+
+### 7. Start the frontend dashboard
+```bash
+# In tps-price-dashboard/ folder
+npm run dev
+```
+Opens the React UI at `http://localhost:5173`. Shows all SKU-matched products in a sortable table with PP, SP, RecommendedSP, Extra Profit %, competitor price and link.
+
 ---
 
 ## Data Flow
