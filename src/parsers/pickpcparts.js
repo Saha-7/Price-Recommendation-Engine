@@ -19,10 +19,28 @@ async function parseProductLinks(page) {
   });
 }
 
+// async function getNextPageUrl(page) {
+//   return await page.evaluate(() => {
+//     const next = document.querySelector('a.next, .ct-pagination a[rel="next"]');
+//     return next ? next.href : null;
+//   });
+// }
+
 async function getNextPageUrl(page) {
   return await page.evaluate(() => {
-    const next = document.querySelector('a.next, .ct-pagination a[rel="next"]');
-    return next ? next.href : null;
+    // Find the pagination nav links
+    const navLinks = [...document.querySelectorAll('.pcp-archive-pagination a[data-page]')];
+    
+    // Find the current active page number
+    const activePage = document.querySelector('.pcp-archive-pagination span');
+    if (!activePage) return null;
+    
+    const currentPage = parseInt(activePage.textContent.trim());
+    if (isNaN(currentPage)) return null;
+    
+    // Find the link with data-page = currentPage + 1
+    const nextLink = navLinks.find(a => parseInt(a.getAttribute('data-page')) === currentPage + 1);
+    return nextLink ? nextLink.href : null;
   });
 }
 
