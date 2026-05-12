@@ -217,6 +217,35 @@ function generateRecommendations(internalProducts, competitorMap) {
 }
 
 // ── Step 6: Update RecommendedSP in InternalProducts ─────────
+// async function updateRecommendedSP(pool, recommendations) {
+//   console.log('\n📤 Updating RecommendedSP in InternalProducts...');
+
+//   let updated = 0;
+//   let failed  = 0;
+
+//   for (const row of recommendations) {
+//     try {
+//       await pool.request()
+//         .input('SKU_ID',        sql.NVarChar(100),  row.SKU_ID)
+//         .input('RecommendedSP', sql.Decimal(10, 2), row.RecommendedPrice)
+//         .query(`
+//           UPDATE InternalProducts
+//           SET    RecommendedSP = @RecommendedSP,
+//                  UpdatedAt     = GETDATE()
+//           WHERE  SKU_ID = @SKU_ID
+//         `);
+//       updated++;
+//     } catch (err) {
+//       failed++;
+//       console.error(`   → ${row.SKU_ID}: ${err.message}`);
+//     }
+//   }
+
+//   console.log(`   ✅ Updated : ${updated}`);
+//   console.log(`   ❌ Failed  : ${failed}`);
+// }
+
+// ── Step 6: Update RecommendedSP in InternalProducts ─────────
 async function updateRecommendedSP(pool, recommendations) {
   console.log('\n📤 Updating RecommendedSP in InternalProducts...');
 
@@ -230,8 +259,8 @@ async function updateRecommendedSP(pool, recommendations) {
         .input('RecommendedSP', sql.Decimal(10, 2), row.RecommendedPrice)
         .query(`
           UPDATE InternalProducts
-          SET    RecommendedSP = @RecommendedSP,
-                 UpdatedAt     = GETDATE()
+          SET    RecommendedSP          = @RecommendedSP,
+                 RecommendedSPUpdatedAt = GETDATE()
           WHERE  SKU_ID = @SKU_ID
         `);
       updated++;
