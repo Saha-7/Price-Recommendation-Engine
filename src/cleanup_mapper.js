@@ -83,23 +83,26 @@ function mapProduct(product) {
   }
 
   if (store === 'pickpcparts') {
-    const lowestRetailer = product.lowestPrice?.retailer;
-    const lowestEntry    = product.retailerPrices?.find(
-      r => r.retailer === lowestRetailer
-    );
+  const lowestRetailer = product.lowestPrice?.retailer;
+  const lowestEntry    = product.retailerPrices?.find(
+    r => r.retailer === lowestRetailer
+  );
 
-    return {
-      ScrapID         : uuidv4(),
-      SKU             : product.partIds?.[0] || null,
-      Name            : product.name || null,
-      CompetitorPrice : parsePrice(product.lowestPrice?.price),
-      ProductURL      : product.url,
-      StockStatus     : lowestEntry?.available || null,
-      StoreName       : 'pickpcparts',
-      Category        : product.category || null,
-      ScrapedAt       : product.scrapedAt,
-    };
-  }
+  // FIX: parser stores partId (string), not partIds (array)
+  const sku = product.partId || product.partIds?.[0] || null;
+
+  return {
+    ScrapID         : uuidv4(),
+    SKU             : sku,
+    Name            : product.name || null,
+    CompetitorPrice : parsePrice(product.lowestPrice?.price),
+    ProductURL      : product.url,
+    StockStatus     : lowestEntry?.available || null,
+    StoreName       : 'pickpcparts',
+    Category        : product.category || null,
+    ScrapedAt       : product.scrapedAt,
+  };
+}
 
   return null;
 }
