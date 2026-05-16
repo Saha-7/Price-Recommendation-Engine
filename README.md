@@ -135,10 +135,3 @@ External SQL DB → Compete_ScrapResults         ← structured (coming)
 
 To add a new store: create a parser in `src/parsers/` and add an entry in `src/urls.js`.
 
----
-
-## TODOs
-
-- [ ] Wire SQL insert into `cleanup_mapper.js` once external SQL DB is ready
-- [ ] Add scheduler/trigger logic based on `ScrapFreq` from Internal DB
-- [ ] Fix MDComputers `category` field (currently returning product name)
