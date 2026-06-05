@@ -1,126 +1,131 @@
 // ─────────────────────────────────────────────────────────────
-//  parsers/primeabgb.js
-//  WooCommerce-based store — selectors are standard WooCommerce
+//  parsers/primeabgb.js  (Web Unlocker / cheerio version)
+//  WooCommerce-based store — same selectors as Playwright version
+//  All functions are now synchronous — receive html string, return data.
 // ─────────────────────────────────────────────────────────────
 
-/**
- * Extracts all product links from a category/listing page.
- */
-async function parseProductLinks(page) {
-  return await page.evaluate(() => {
-    const links = new Set();
-    document.querySelectorAll('a[href]').forEach(a => {
-      const href = a.href;
-      if (href.includes('/online-price-reviews-india/')) {
-        links.add(href.split('?')[0]);
-      }
-    });
-    return [...links];
+const cheerio = require('cheerio');
+
+// ── Extract all product links from a category/listing page ───
+function parseProductLinks(html) {
+  const $ = cheerio.load(html);
+  const links = new Set();
+  const BASE = 'https://www.primeabgb.com';
+
+  $('a[href]').each((_, el) => {
+    let href = $(el).attr('href') || '';
+
+    // Resolve relative URLs to absolute
+    if (href.startsWith('/')) href = BASE + href;
+
+    if (href.includes('/online-price-reviews-india/')) {
+      links.add(href.split('?')[0]);
+    }
   });
+
+  return [...links];
 }
 
-/**
- * Returns the next pagination URL, or null on last page.
- */
-async function getNextPageUrl(page) {
-  return await page.evaluate(() => {
-    const next = document.querySelector('a.next.page-numbers');
-    return next ? next.href : null;
-  });
+// ── Return the next pagination URL, or null on last page ─────
+function getNextPageUrl(html) {
+  const $ = cheerio.load(html);
+  const next = $('a.next.page-numbers').attr('href');
+  return next || null;
 }
 
-/**
- * Extracts all product data from a single product detail page.
- */
-async function parseProductDetails(page, url) {
-  return await page.evaluate((pageUrl) => {
-    const getText = (selector) =>
-      document.querySelector(selector)?.innerText?.trim() || null;
+// ── Extract all product data from a single product page ──────
+function parseProductDetails(html, url) {
+  const $ = cheerio.load(html);
 
-    // ── Name ──────────────────────────────────────────────────
-    const name =
-      getText('.product_title') ||
-      getText('h1.entry-title') ||
-      getText('h1');
+  const getText = (selector) => $(selector).first().text().trim() || null;
 
-    // ── Prices ────────────────────────────────────────────────
-    const salePrice =
-      getText('.price ins .woocommerce-Price-amount') ||
-      getText('.price ins') ||
-      getText('.woocommerce-Price-amount');
+  // ── Name ──────────────────────────────────────────────────
+  const name =
+    getText('.product_title') ||
+    getText('h1.entry-title') ||
+    getText('h1');
 
-    const originalPrice =
-      getText('.price del .woocommerce-Price-amount') ||
-      getText('.price del') ||
-      null;
+  // ── Prices ────────────────────────────────────────────────
+  // WooCommerce: sale price is inside <ins>, original inside <del>
+  const salePrice =
+    $('.price ins .woocommerce-Price-amount bdi').first().text().trim() ||
+    $('.price ins').first().text().trim() ||
+    $('.woocommerce-Price-amount bdi').first().text().trim() ||
+    null;
 
-    const discountBadge =
-      getText('.onsale') ||
-      getText('.badge-sale') ||
-      null;
+  const originalPrice =
+    $('.price del .woocommerce-Price-amount bdi').first().text().trim() ||
+    $('.price del').first().text().trim() ||
+    null;
 
-    // ── SKU & Stock ───────────────────────────────────────────
-    const sku = getText('.sku') || null;
+  const discountBadge =
+    getText('.onsale') ||
+    getText('.badge-sale') ||
+    null;
 
-    const stockStatus =
-  getText('.stock-availability') ||   // ✅ correct one
-  getText('.stock') ||
-  null;
+  // ── SKU & Stock ───────────────────────────────────────────
+  const sku = getText('.sku') || null;
 
-    // ── Category ──────────────────────────────────────────────
-    const breadcrumbs = [...document.querySelectorAll('.woocommerce-breadcrumb a, nav.breadcrumb a')]
-      .map(a => a.innerText.trim())
-      .filter(Boolean);
+  const stockStatus =
+    getText('.stock-availability') ||
+    getText('.stock') ||
+    null;
 
-    const category = breadcrumbs.length > 1
-      ? breadcrumbs[breadcrumbs.length - 1]
-      : getText('.posted_in a') || null;
+  // ── Category (from breadcrumb) ────────────────────────────
+  const breadcrumbs = [];
+  $('.woocommerce-breadcrumb a, nav.breadcrumb a').each((_, el) => {
+    const t = $(el).text().trim();
+    if (t) breadcrumbs.push(t);
+  });
 
-    // ── Tags ──────────────────────────────────────────────────
-    const tags = [...document.querySelectorAll('.tagged_as a')]
-      .map(a => a.innerText.trim())
-      .filter(Boolean);
+  const category = breadcrumbs.length > 1
+    ? breadcrumbs[breadcrumbs.length - 1]
+    : getText('.posted_in a') || null;
 
-    // ── Images ───────────────────────────────────────────────
-    const images = [...document.querySelectorAll(
-      '.woocommerce-product-gallery img, .product-images img'
-    )]
-      .map(img => img.getAttribute('src') || img.getAttribute('data-src'))
-      .filter(Boolean);
+  // ── Tags ──────────────────────────────────────────────────
+  const tags = [];
+  $('.tagged_as a').each((_, el) => {
+    const t = $(el).text().trim();
+    if (t) tags.push(t);
+  });
 
-    // ── Specs ─────────────────────────────────────────────────
-    const specs = {};
-    document.querySelectorAll(
-      '.woocommerce-product-attributes tr, .shop_attributes tr'
-    ).forEach(row => {
-      const key   = row.querySelector('th')?.innerText?.trim();
-      const value = row.querySelector('td')?.innerText?.trim();
-      if (key && value) specs[key] = value;
-    });
+  // ── Images ───────────────────────────────────────────────
+  const images = [];
+  $('.woocommerce-product-gallery img, .product-images img').each((_, el) => {
+    const src = $(el).attr('src') || $(el).attr('data-src');
+    if (src) images.push(src);
+  });
 
-    // ── Short Description ─────────────────────────────────────
-    const shortDescription =
-      getText('.woocommerce-product-details__short-description') ||
-      getText('.short-description') ||
-      null;
+  // ── Specs ─────────────────────────────────────────────────
+  const specs = {};
+  $('.woocommerce-product-attributes tr, .shop_attributes tr').each((_, row) => {
+    const key   = $(row).find('th').text().trim();
+    const value = $(row).find('td').text().trim();
+    if (key && value) specs[key] = value;
+  });
 
-    return {
-      url: pageUrl,
-      store: 'primeabgb',
-      name,
-      sku,
-      category,
-      stockStatus,
-      salePrice,
-      originalPrice,
-      discountBadge,
-      shortDescription,
-      tags,
-      images,
-      specs,
-      scrapedAt: new Date().toISOString(),
-    };
-  }, url);
+  // ── Short Description ─────────────────────────────────────
+  const shortDescription =
+    getText('.woocommerce-product-details__short-description') ||
+    getText('.short-description') ||
+    null;
+
+  return {
+    url,
+    store: 'primeabgb',
+    name,
+    sku,
+    category,
+    stockStatus,
+    salePrice     : salePrice     || null,
+    originalPrice : originalPrice || null,
+    discountBadge : discountBadge || null,
+    shortDescription,
+    tags,
+    images,
+    specs,
+    scrapedAt: new Date().toISOString(),
+  };
 }
 
 module.exports = { parseProductLinks, getNextPageUrl, parseProductDetails };
