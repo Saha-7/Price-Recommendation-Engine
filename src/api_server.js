@@ -999,6 +999,99 @@ app.get('/api/recommendation-job/:jobId', requireAuth, (req, res) => {
 });
 
 
+
+
+
+
+
+
+
+// ─────────────────────────────────────────────────────────────
+// ADD THESE TWO ROUTES TO src/api_server.js
+//
+// Paste them anywhere after the existing recommendation engine routes.
+// The pattern is identical to /api/run-recommendation-engine —
+// fire-and-forget, returns jobId immediately, frontend polls for status.
+//
+// Also add this import near the top of api_server.js alongside
+// the existing recommendation_engine import:
+//
+//   const { runScheduler } = require('./scheduler/index');
+//
+// Gate: requireRole(['admin', 'supervisor']) — sales staff cannot
+// trigger a full scrape that burns Bright Data API credits.
+// ─────────────────────────────────────────────────────────────
+
+const scraperJobs = new Map(); // jobId → { status, startedAt, startedBy, categoriesDone, totalScraped, error, finishedAt }
+
+// ── POST /api/run-scraper ─────────────────────────────────────
+// Triggers the full scheduler (all due categories) on demand.
+// Returns jobId immediately; frontend polls /api/scraper-job/:jobId.
+//
+// Role gate: admin + supervisor only.
+// Prevents two simultaneous runs — same guard as recommendation engine.
+app.post('/api/run-scraper', requireRole(['admin', 'supervisor']), async (req, res) => {
+  const id        = uuidv4();
+  const startedBy = req.session?.user?.email || 'unknown';
+
+  // Prevent two simultaneous scraper runs
+  const alreadyRunning = [...scraperJobs.values()].find(j => j.status === 'running');
+  if (alreadyRunning) {
+    return res.status(409).json({
+      success: false,
+      error  : 'Scraper is already running. Wait for it to finish.',
+    });
+  }
+
+  scraperJobs.set(id, {
+    status      : 'running',
+    startedAt   : new Date().toISOString(),
+    startedBy,
+    categoriesDone: null,
+    totalScraped  : null,
+    error         : null,
+    finishedAt    : null,
+  });
+
+  console.log(`🚀 Manual scraper triggered by ${startedBy} | job=${id}`);
+
+  // Fire and forget
+  (async () => {
+    const job = scraperJobs.get(id);
+    try {
+      // runScheduler() handles everything:
+      // scrape → Cosmos push per category → cleanup mapper → SQL upsert
+      await runScheduler();
+
+      job.status       = 'done';
+      job.finishedAt   = new Date().toISOString();
+      console.log(`✅ Manual scraper done | job=${id}`);
+    } catch (err) {
+      job.status     = 'error';
+      job.error      = err.message;
+      job.finishedAt = new Date().toISOString();
+      console.error(`❌ Manual scraper failed | job=${id}:`, err.message);
+    }
+  })();
+
+  res.json({ success: true, jobId: id });
+});
+
+
+// ── GET /api/scraper-job/:jobId ───────────────────────────────
+// Poll for scraper job status.
+app.get('/api/scraper-job/:jobId', requireRole(['admin', 'supervisor']), (req, res) => {
+  const job = scraperJobs.get(req.params.jobId);
+  if (!job) return res.status(404).json({ success: false, error: 'Job not found' });
+  res.json({ success: true, data: job });
+});
+
+
+
+
+
+
+
 // ── GET /api/health ───────────────────────────────────────────
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
