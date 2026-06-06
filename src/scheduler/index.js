@@ -1,30 +1,24 @@
 // src/scheduler/index.js
 //
-// CHANGES:
-//   1. clearCategoryCache() — deletes visited.json, collected_urls.json,
-//      products_full.json, products_prices.json before each scheduled scrape
-//      so the scraper always starts fresh on automated runs.
+// CHANGE (safety improvement):
+//   pushScrapedDataToCosmos() is now called PER CATEGORY immediately
+//   after scrapeCategory() completes — instead of batching everything
+//   at the end. This means a mid-run crash only loses the current
+//   category's data, not all categories scraped so far.
 //
-//   2. pushScrapedDataToCosmos() — now uses the in-memory products[]
-//      returned directly from scrapeCategory() instead of reading back
-//      from the output/ folder on disk. This is Azure-safe because the
-//      local filesystem on Azure App Service / Functions is ephemeral.
-//
-//   3. scrapedProducts[] — collected in memory during the scrape loop,
-//      passed directly to pushScrapedDataToCosmos(). No disk read needed.
-//
-//   4. The output/ folder writes still happen inside scrapeCategory()
-//      as a local backup/log — but the scheduler does NOT depend on them.
+//   runCleanupMapper() is still called ONCE at the end (after all
+//   categories) because it reads ALL of Cosmos and does a single bulk
+//   MERGE into SQL. Running it per-category would cause redundant work.
 //
 // FULL AUTOMATED FLOW:
 //   Scheduler fires
 //     → Load category schedule from SQL
 //     → For each due category:
 //         a. clearCategoryCache()        wipe stale disk files
-//         b. scrapeCategory()            scrape + write disk (backup) + return products[] in memory
-//         c. updateScrapedTimestamps()   update NextScrapDueAt in SQL
-//     → pushScrapedDataToCosmos()        push in-memory products[] directly to Cosmos (no disk read)
-//     → runCleanupMapper()               Cosmos → map → upsert CompetitorPrices SQL
+//         b. scrapeCategory()            scrape → return products[] in memory
+//         c. pushScrapedDataToCosmos()   push THIS category immediately ← CHANGED
+//         d. updateScrapedTimestamps()   update NextScrapDueAt in SQL
+//     → runCleanupMapper()              Cosmos → map → upsert CompetitorPrices SQL (once, at end)
 // ─────────────────────────────────────────────────────────────
 
 require('dotenv').config();
@@ -42,11 +36,11 @@ const { getPaths }             = require('../scraper/fileHelpers');
 // ── System-wide default frequencies (days) ───────────────────
 const DEFAULT_FREQUENCIES = {
   'Processor' : 7,
-  'RAM'       : 3,
-  'SSD'       : 3,
-  'HDD'       : 3,
-  'Storage'   : 3,
-  'DEFAULT'   : 2,
+  'RAM'       : 7,
+  'SSD'       : 7,
+  'HDD'       : 7,
+  'Storage'   : 7,
+  'DEFAULT'   : 7,
 };
 
 function getDefaultFrequency(categoryName) {
@@ -143,20 +137,14 @@ function findStoreConfig(categoryName) {
 }
 
 // ── Clear stale cache files before each scheduled scrape ──────
-// Deletes visited.json and collected_urls.json so the scraper
-// re-discovers all product URLs and re-scrapes everything fresh.
-// Also clears output JSON files so no stale products get mixed
-// into the new run's data.
-//
-// Only called by the scheduler — manual runs keep resume support.
 function clearCategoryCache(storeName, categorySlug) {
   const paths = getPaths(storeName, categorySlug);
 
   const filesToDelete = [
-    paths.visitedCache,   // visited.json         — would skip all URLs if kept
-    paths.urlsCache,      // collected_urls.json   — URL discovery cache
-    paths.fullOutput,     // products_full.json    — stale scraped data
-    paths.priceOutput,    // products_prices.json  — stale price extract
+    paths.visitedCache,
+    paths.urlsCache,
+    paths.fullOutput,
+    paths.priceOutput,
   ];
 
   for (const filePath of filesToDelete) {
@@ -167,17 +155,18 @@ function clearCategoryCache(storeName, categorySlug) {
   }
 }
 
-// ── Push in-memory scraped products directly to Cosmos ────────
-// CHANGE: accepts products[] array directly from scrapeCategory()
-// instead of reading back from the output/ folder on disk.
+// ── Push products for ONE category to Cosmos immediately ──────
+// CHANGE: was previously called once at the end with ALL products.
+// Now called per-category right after scrapeCategory() returns.
+// This means a crash mid-run only loses the current category,
+// not everything scraped before it.
 //
-// WHY: Azure App Service / Functions has an ephemeral filesystem.
-// Reading from disk after writing is unreliable in cloud deployments.
-// Holding products in memory and pushing directly is Azure-safe.
-async function pushScrapedDataToCosmos(scrapedProducts) {
-  if (scrapedProducts.length === 0) {
-    console.log('   ⚠️  No products to push to Cosmos');
-    return;
+// Cosmos upsert is idempotent (same URL = same id), so re-running
+// is always safe — no duplicates, no data corruption.
+async function pushScrapedDataToCosmos(products, categoryLabel) {
+  if (!products || products.length === 0) {
+    console.log(`   ⚠️  No products to push to Cosmos for ${categoryLabel}`);
+    return { pushed: 0, failed: 0 };
   }
 
   const client    = new CosmosClient(process.env.COSMOS_CONNECTION_STRING);
@@ -186,11 +175,10 @@ async function pushScrapedDataToCosmos(scrapedProducts) {
   let pushed = 0;
   let failed = 0;
 
-  console.log(`   Uploading ${scrapedProducts.length} products to Cosmos...`);
+  console.log(`   ☁️  Pushing ${products.length} products to Cosmos (${categoryLabel})...`);
 
-  for (const product of scrapedProducts) {
+  for (const product of products) {
     try {
-      // Cosmos requires an 'id' field — same logic as upload_to_cosmos.js
       product.id = Buffer.from(product.url).toString('base64').substring(0, 255);
       await container.items.upsert(product);
       pushed++;
@@ -200,10 +188,14 @@ async function pushScrapedDataToCosmos(scrapedProducts) {
     }
   }
 
-  console.log(`   ✅ Cosmos upload done — pushed: ${pushed} | failed: ${failed}`);
+  console.log(`   ✅ Cosmos push done — pushed: ${pushed} | failed: ${failed}`);
+  return { pushed, failed };
 }
 
 // ── Read from Cosmos → map → push to SQL (unchanged) ─────────
+// Still runs once at the END after all categories are done.
+// This is intentional: running it per-category would cause multiple
+// full-table scans of Cosmos and redundant SQL MERGE operations.
 async function runCleanupMapper() {
   const client    = new CosmosClient(process.env.COSMOS_CONNECTION_STRING);
   const container = client.database('ScraperDB').container('scrap_results');
@@ -273,7 +265,8 @@ async function runScheduler() {
 
     let totalScraped    = 0;
     let totalFailed     = 0;
-    const allProducts   = []; // ← collect all scraped products in memory across all categories
+    let totalPushed     = 0;  // track total Cosmos pushes across all categories
+    let categoriesDone  = 0;
 
     for (const row of due) {
       console.log(`\n━━━ ${row.Category} (every ${row.freqDays} days) ━━━`);
@@ -292,40 +285,48 @@ async function runScheduler() {
       clearCategoryCache(config.store.name, config.category.slug);
 
       try {
-        // scrapeCategory() now returns products[] in memory
+        // 1. Scrape — returns products[] in memory
         const result = await scrapeCategory(config.store, config.category);
         totalScraped += result.saved;
         totalFailed  += result.failed;
 
-        // Collect products in memory for Cosmos upload
+        // 2. Push THIS category to Cosmos immediately
+        //    CHANGE: was at the end, now per-category for crash safety
         if (result.products && result.products.length > 0) {
-          allProducts.push(...result.products);
-          console.log(`   📦 ${result.products.length} products collected in memory`);
+          const { pushed } = await pushScrapedDataToCosmos(
+            result.products,
+            `${config.store.name}/${config.category.slug}`
+          );
+          totalPushed += pushed;
+        } else {
+          console.log(`   ⚠️  No products returned for ${row.Category} — skipping Cosmos push`);
         }
 
+        // 3. Update SQL timestamps so this category is marked done
         await updateScrapedTimestamps(pool, row.Category, row.freqDays);
+        categoriesDone++;
+
       } catch (err) {
         console.error(`   ❌ Scrape failed for ${row.Category}: ${err.message}`);
         totalFailed++;
+        // Continue to next category — don't abort the whole run
       }
     }
 
-    // Push all freshly scraped products directly to Cosmos from memory
-    // No disk read needed — Azure-safe
-    if (allProducts.length > 0) {
-      console.log(`\n☁️  Pushing ${allProducts.length} products to Cosmos (in-memory, no disk read)...`);
-      await pushScrapedDataToCosmos(allProducts);
-    } else {
-      console.log('\n⚠️  No products collected — skipping Cosmos upload');
-    }
-
     // Map Cosmos documents → upsert into CompetitorPrices SQL table
-    console.log('\n📤 Running cleanup mapper (Cosmos → SQL)...');
-    await runCleanupMapper();
+    // Runs once at the end so all freshly pushed data is included
+    if (categoriesDone > 0) {
+      console.log('\n📤 Running cleanup mapper (Cosmos → SQL)...');
+      await runCleanupMapper();
+    } else {
+      console.log('\n⚠️  No categories completed — skipping cleanup mapper');
+    }
 
     const totalSec = ((Date.now() - startTime) / 1000).toFixed(1);
     console.log(`\n🎉 Scheduler done in ${totalSec}s`);
+    console.log(`   Categories done  : ${categoriesDone}`);
     console.log(`   Products scraped : ${totalScraped}`);
+    console.log(`   Cosmos pushed    : ${totalPushed}`);
     console.log(`   Failed           : ${totalFailed}`);
 
   } catch (err) {
